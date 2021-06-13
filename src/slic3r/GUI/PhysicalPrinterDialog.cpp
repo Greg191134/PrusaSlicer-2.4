@@ -424,7 +424,7 @@ void PhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup* m_optgr
             {
 #ifndef __WXGTK__
                 e.Skip();
-                temp->GetToolTip()->Enable(true);
+                // temp->GetToolTip()->Enable(true);
 #endif // __WXGTK__
                 TextCtrl* field = dynamic_cast<TextCtrl*>(printhost_field);
                 if (field)
