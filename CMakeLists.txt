@@ -243,9 +243,10 @@ endif()
 if (SLIC3R_ASAN)
     # ASAN should be available on MSVC starting with Visual Studio 2019 16.9
     # https://devblogs.microsoft.com/cppblog/address-sanitizer-for-msvc-now-generally-available/
-    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+    add_compile_options(-fsanitize=address)
 
     if (NOT MSVC)
+        add_compile_options(-fno-omit-frame-pointer)
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address")
         set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")
         set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -fsanitize=address")
@@ -268,8 +269,6 @@ set(LIBDIR_BIN ${CMAKE_CURRENT_BINARY_DIR}/src)
 include_directories(${LIBDIR})
 # For generated header files
 include_directories(${LIBDIR_BIN}/platform)
-# For libslic3r.h
-include_directories(${LIBDIR}/clipper)
 
 if(WIN32)
     add_definitions(-D_USE_MATH_DEFINES -D_WIN32 -D_CRT_SECURE_NO_WARNINGS -D_SCL_SECURE_NO_WARNINGS)

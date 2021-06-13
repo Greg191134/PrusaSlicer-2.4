@@ -1,6 +1,8 @@
 #include "Config.hpp"
 #include "format.hpp"
 #include "Utils.hpp"
+#include "LocalesUtils.hpp"
+
 #include <assert.h>
 #include <fstream>
 #include <iostream>
@@ -462,7 +464,7 @@ void ConfigBase::set(const std::string &opt_key, double value, bool create)
     switch (opt->type()) {
     	case coFloat:  			static_cast<ConfigOptionFloat*>(opt)->value = value; break;
     	case coFloatOrPercent:  static_cast<ConfigOptionFloatOrPercent*>(opt)->value = value; static_cast<ConfigOptionFloatOrPercent*>(opt)->percent = false; break;
-		case coString: 			static_cast<ConfigOptionString*>(opt)->value = std::to_string(value); break;
+        case coString: 			static_cast<ConfigOptionString*>(opt)->value = float_to_string_decimal_point(value); break;
     	default: throw BadOptionTypeException("Configbase::set() - conversion from float not possible");
     }
 }
@@ -471,8 +473,8 @@ bool ConfigBase::set_deserialize_nothrow(const t_config_option_key &opt_key_src,
 {
     t_config_option_key opt_key = opt_key_src;
     std::string         value   = value_src;
-    // Both opt_key and value may be modified by _handle_legacy().
-    // If the opt_key is no more valid in this version of Slic3r, opt_key is cleared by _handle_legacy().
+    // Both opt_key and value may be modified by handle_legacy().
+    // If the opt_key is no more valid in this version of Slic3r, opt_key is cleared by handle_legacy().
     this->handle_legacy(opt_key, value);
     if (opt_key.empty())
         // Ignore the option.

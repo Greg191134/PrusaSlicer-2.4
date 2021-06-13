@@ -86,7 +86,8 @@ std::string PresetHints::maximum_volumetric_flow_description(const PresetBundle 
 
     // Print config values
     double layer_height                     = print_config.opt_float("layer_height");
-    double first_layer_height               = print_config.get_abs_value("first_layer_height", layer_height);
+    assert(! print_config.option<ConfigOptionFloatOrPercent>("first_layer_height")->percent);
+    double first_layer_height               = print_config.opt_float("first_layer_height");
     double support_material_speed           = print_config.opt_float("support_material_speed");
     double support_material_interface_speed = print_config.get_abs_value("support_material_interface_speed", support_material_speed);
     double bridge_speed                     = print_config.opt_float("bridge_speed");
@@ -208,22 +209,20 @@ std::string PresetHints::recommended_thin_wall_thickness(const PresetBundle &pre
 		out += _utf8(L("Recommended object thin wall thickness: Not available due to invalid layer height."));
 		return out;
 	}
-
-    Flow    external_perimeter_flow             = Flow::new_from_config_width(
-        frExternalPerimeter, 
-        *print_config.opt<ConfigOptionFloatOrPercent>("external_perimeter_extrusion_width"), 
-        nozzle_diameter, layer_height);
-    Flow    perimeter_flow                      = Flow::new_from_config_width(
-        frPerimeter, 
-        *print_config.opt<ConfigOptionFloatOrPercent>("perimeter_extrusion_width"), 
-        nozzle_diameter, layer_height);
-
     
     if (num_perimeters > 0) {
         int num_lines = std::min(num_perimeters * 2, 10);
         out += (boost::format(_utf8(L("Recommended object thin wall thickness for layer height %.2f and"))) % layer_height).str() + " ";
         // Start with the width of two closely spaced 
         try {
+            Flow external_perimeter_flow = Flow::new_from_config_width(
+                frExternalPerimeter, 
+                *print_config.opt<ConfigOptionFloatOrPercent>("external_perimeter_extrusion_width"), 
+                nozzle_diameter, layer_height);
+            Flow perimeter_flow          = Flow::new_from_config_width(
+                frPerimeter, 
+                *print_config.opt<ConfigOptionFloatOrPercent>("perimeter_extrusion_width"), 
+                nozzle_diameter, layer_height);
 	        double width = external_perimeter_flow.width() + external_perimeter_flow.spacing();
 	        for (int i = 2; i <= num_lines; thin_walls ? ++ i : i += 2) {
 	            if (i > 2)

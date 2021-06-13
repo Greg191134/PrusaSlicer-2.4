@@ -23,6 +23,8 @@ add_library(libslic3r STATIC
     BridgeDetector.hpp
     Brim.cpp
     Brim.hpp
+    clipper.cpp
+    clipper.hpp
     ClipperUtils.cpp
     ClipperUtils.hpp
     Config.cpp
@@ -124,10 +126,14 @@ add_library(libslic3r STATIC
     Line.hpp
     LibraryCheck.cpp
     LibraryCheck.hpp
+    LocalesUtils.cpp
+    LocalesUtils.hpp
     Model.cpp
     Model.hpp
     ModelArrange.hpp
     ModelArrange.cpp
+    MultiMaterialSegmentation.cpp
+    MultiMaterialSegmentation.hpp
     CustomGCode.cpp
     CustomGCode.hpp
     Arrange.hpp
@@ -161,11 +167,13 @@ add_library(libslic3r STATIC
     AppConfig.hpp
     Print.cpp
     Print.hpp
+    PrintApply.cpp
     PrintBase.cpp
     PrintBase.hpp
     PrintConfig.cpp
     PrintConfig.hpp
     PrintObject.cpp
+    PrintObjectSlice.cpp
     PrintRegion.cpp
     PNGReadWrite.hpp
     PNGReadWrite.cpp
@@ -195,6 +203,9 @@ add_library(libslic3r STATIC
     Tesselate.hpp
     TriangleMesh.cpp
     TriangleMesh.hpp
+    TriangleMeshSlicer.cpp
+    TriangleMeshSlicer.hpp
+    MeshSplitImpl.hpp
     TriangulateWall.hpp
     TriangulateWall.cpp
     utils.cpp
@@ -256,8 +267,6 @@ add_library(libslic3r STATIC
     SLA/SupportPoint.hpp
     SLA/SupportPointGenerator.hpp
     SLA/SupportPointGenerator.cpp
-    SLA/Contour3D.hpp
-    SLA/Contour3D.cpp
     SLA/IndexedMesh.hpp
     SLA/IndexedMesh.cpp
     SLA/Clustering.hpp

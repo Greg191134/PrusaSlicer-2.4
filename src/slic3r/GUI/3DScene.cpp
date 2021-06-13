@@ -23,6 +23,9 @@
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/AppConfig.hpp"
+#if DISABLE_ALLOW_NEGATIVE_Z_FOR_SLA
+#include "libslic3r/PresetBundle.hpp"
+#endif // DISABLE_ALLOW_NEGATIVE_Z_FOR_SLA
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -345,9 +348,16 @@ void GLVolume::set_render_color(const float* rgba, unsigned int size)
 
 void GLVolume::set_render_color()
 {
-    if (force_native_color || force_neutral_color)
-    {
+#if ENABLE_ALLOW_NEGATIVE_Z
+    bool outside = is_outside || is_below_printbed();
+#endif // ENABLE_ALLOW_NEGATIVE_Z
+
+    if (force_native_color || force_neutral_color) {
+#if ENABLE_ALLOW_NEGATIVE_Z
+        if (outside && shader_outside_printer_detection_enabled)
+#else
         if (is_outside && shader_outside_printer_detection_enabled)
+#endif // ENABLE_ALLOW_NEGATIVE_Z
             set_render_color(OUTSIDE_COLOR, 4);
         else {
             if (force_native_color)
@@ -362,17 +372,24 @@ void GLVolume::set_render_color()
         else if (hover == HS_Deselect)
             set_render_color(HOVER_DESELECT_COLOR, 4);
         else if (selected)
+#if ENABLE_ALLOW_NEGATIVE_Z
+            set_render_color(outside ? SELECTED_OUTSIDE_COLOR : SELECTED_COLOR, 4);
+#else
             set_render_color(is_outside ? SELECTED_OUTSIDE_COLOR : SELECTED_COLOR, 4);
+#endif // ENABLE_ALLOW_NEGATIVE_Z
         else if (disabled)
             set_render_color(DISABLED_COLOR, 4);
+#if ENABLE_ALLOW_NEGATIVE_Z
+        else if (outside && shader_outside_printer_detection_enabled)
+#else
         else if (is_outside && shader_outside_printer_detection_enabled)
+#endif // ENABLE_ALLOW_NEGATIVE_Z
             set_render_color(OUTSIDE_COLOR, 4);
         else
             set_render_color(color, 4);
     }
 
-    if (!printable)
-    {
+    if (!printable) {
         render_color[0] /= 4;
         render_color[1] /= 4;
         render_color[2] /= 4;
@@ -384,7 +401,12 @@ void GLVolume::set_render_color()
 
 void GLVolume::set_color_from_model_volume(const ModelVolume *model_volume)
 {
-    if (model_volume->is_modifier()) {
+    if (model_volume->is_negative_volume()) {
+        color[0] = 0.2f;
+        color[1] = 0.2f;
+        color[2] = 0.2f;
+    }
+    else if (model_volume->is_modifier()) {
         color[0] = 0.2f;
         color[1] = 1.0f;
         color[2] = 0.2f;
@@ -421,20 +443,24 @@ const BoundingBoxf3& GLVolume::transformed_bounding_box() const
     const BoundingBoxf3& box = bounding_box();
     assert(box.defined || box.min(0) >= box.max(0) || box.min(1) >= box.max(1) || box.min(2) >= box.max(2));
 
-    if (m_transformed_bounding_box_dirty)
-    {
-        m_transformed_bounding_box = box.transformed(world_matrix());
-        m_transformed_bounding_box_dirty = false;
+    BoundingBoxf3* transformed_bounding_box = const_cast<BoundingBoxf3*>(&m_transformed_bounding_box);
+    bool* transformed_bounding_box_dirty = const_cast<bool*>(&m_transformed_bounding_box_dirty);
+    if (*transformed_bounding_box_dirty) {
+        *transformed_bounding_box = box.transformed(world_matrix());
+        *transformed_bounding_box_dirty = false;
     }
-
-    return m_transformed_bounding_box;
+    return *transformed_bounding_box;
 }
 
 const BoundingBoxf3& GLVolume::transformed_convex_hull_bounding_box() const
 {
-	if (m_transformed_convex_hull_bounding_box_dirty)
-		m_transformed_convex_hull_bounding_box = this->transformed_convex_hull_bounding_box(world_matrix());
-    return m_transformed_convex_hull_bounding_box;
+    BoundingBoxf3* transformed_convex_hull_bounding_box = const_cast<BoundingBoxf3*>(&m_transformed_convex_hull_bounding_box);
+    bool* transformed_convex_hull_bounding_box_dirty = const_cast<bool*>(&m_transformed_convex_hull_bounding_box_dirty);
+    if (*transformed_convex_hull_bounding_box_dirty) {
+        *transformed_convex_hull_bounding_box = this->transformed_convex_hull_bounding_box(world_matrix());
+        *transformed_convex_hull_bounding_box_dirty = false;
+    }
+    return *transformed_convex_hull_bounding_box;
 }
 
 BoundingBoxf3 GLVolume::transformed_convex_hull_bounding_box(const Transform3d &trafo) const
@@ -499,6 +525,25 @@ void GLVolume::render() const
 
 bool GLVolume::is_sla_support() const { return this->composite_id.volume_id == -int(slaposSupportTree); }
 bool GLVolume::is_sla_pad() const { return this->composite_id.volume_id == -int(slaposPad); }
+
+#if ENABLE_ALLOW_NEGATIVE_Z
+bool GLVolume::is_sinking() const
+{
+#if DISABLE_ALLOW_NEGATIVE_Z_FOR_SLA
+    if (is_modifier || GUI::wxGetApp().preset_bundle->printers.get_edited_preset().printer_technology() == ptSLA)
+#else
+    if (is_modifier)
+#endif // DISABLE_ALLOW_NEGATIVE_Z_FOR_SLA
+        return false;
+    const BoundingBoxf3& box = transformed_convex_hull_bounding_box();
+    return box.min.z() < SINKING_Z_THRESHOLD && box.max.z() >= SINKING_Z_THRESHOLD;
+}
+
+bool GLVolume::is_below_printbed() const
+{
+    return transformed_convex_hull_bounding_box().max(2) < 0.0;
+}
+#endif // ENABLE_ALLOW_NEGATIVE_Z
 
 std::vector<int> GLVolumeCollection::load_object(
     const ModelObject       *model_object,
@@ -774,6 +819,9 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType type, bool disab
         shader->set_uniform("print_box.volume_world_matrix", volume.first->world_matrix());
         shader->set_uniform("slope.actived", m_slope.active && !volume.first->is_modifier && !volume.first->is_wipe_tower);
         shader->set_uniform("slope.volume_world_normal_matrix", static_cast<Matrix3f>(volume.first->world_matrix().matrix().block(0, 0, 3, 3).inverse().transpose().cast<float>()));
+#if ENABLE_ALLOW_NEGATIVE_Z
+        shader->set_uniform("sinking", volume.first->is_sinking());
+#endif // ENABLE_ALLOW_NEGATIVE_Z
 
         volume.first->render();
     }
@@ -795,7 +843,7 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType type, bool disab
     glsafe(::glDisable(GL_BLEND));
 }
 
-bool GLVolumeCollection::check_outside_state(const DynamicPrintConfig* config, ModelInstanceEPrintVolumeState* out_state)
+bool GLVolumeCollection::check_outside_state(const DynamicPrintConfig* config, ModelInstanceEPrintVolumeState* out_state) const
 {
     if (config == nullptr)
         return false;
@@ -805,7 +853,7 @@ bool GLVolumeCollection::check_outside_state(const DynamicPrintConfig* config, M
         return false;
 
     BoundingBox bed_box_2D = get_extents(Polygon::new_scale(opt->values));
-    BoundingBoxf3 print_volume(Vec3d(unscale<double>(bed_box_2D.min(0)), unscale<double>(bed_box_2D.min(1)), 0.0), Vec3d(unscale<double>(bed_box_2D.max(0)), unscale<double>(bed_box_2D.max(1)), config->opt_float("max_print_height")));
+    BoundingBoxf3 print_volume({ unscale<double>(bed_box_2D.min(0)), unscale<double>(bed_box_2D.min(1)), 0.0 }, { unscale<double>(bed_box_2D.max(0)), unscale<double>(bed_box_2D.max(1)), config->opt_float("max_print_height") });
     // Allow the objects to protrude below the print bed
     print_volume.min(2) = -1e10;
     print_volume.min(0) -= BedEpsilon;
@@ -817,9 +865,8 @@ bool GLVolumeCollection::check_outside_state(const DynamicPrintConfig* config, M
 
     bool contained_min_one = false;
 
-    for (GLVolume* volume : this->volumes)
-    {
-        if ((volume == nullptr) || volume->is_modifier || (volume->is_wipe_tower && !volume->shader_outside_printer_detection_enabled) || ((volume->composite_id.volume_id < 0) && !volume->shader_outside_printer_detection_enabled))
+    for (GLVolume* volume : this->volumes) {
+        if (volume == nullptr || volume->is_modifier || (volume->is_wipe_tower && !volume->shader_outside_printer_detection_enabled) || (volume->composite_id.volume_id < 0 && !volume->shader_outside_printer_detection_enabled))
             continue;
 
         const BoundingBoxf3& bb = volume->transformed_convex_hull_bounding_box();
@@ -832,10 +879,10 @@ bool GLVolumeCollection::check_outside_state(const DynamicPrintConfig* config, M
         if (contained)
             contained_min_one = true;
 
-        if ((state == ModelInstancePVS_Inside) && volume->is_outside)
+        if (state == ModelInstancePVS_Inside && volume->is_outside)
             state = ModelInstancePVS_Fully_Outside;
 
-        if ((state == ModelInstancePVS_Fully_Outside) && volume->is_outside && print_volume.intersects(bb))
+        if (state == ModelInstancePVS_Fully_Outside && volume->is_outside && print_volume.intersects(bb))
             state = ModelInstancePVS_Partly_Outside;
     }
 
@@ -845,7 +892,7 @@ bool GLVolumeCollection::check_outside_state(const DynamicPrintConfig* config, M
     return contained_min_one;
 }
 
-bool GLVolumeCollection::check_outside_state(const DynamicPrintConfig* config, bool& partlyOut, bool& fullyOut)
+bool GLVolumeCollection::check_outside_state(const DynamicPrintConfig* config, bool& partlyOut, bool& fullyOut) const
 {
     if (config == nullptr)
         return false;
@@ -867,9 +914,8 @@ bool GLVolumeCollection::check_outside_state(const DynamicPrintConfig* config, b
 
     partlyOut = false;
     fullyOut = false;
-    for (GLVolume* volume : this->volumes)
-    {
-        if ((volume == nullptr) || volume->is_modifier || (volume->is_wipe_tower && !volume->shader_outside_printer_detection_enabled) || ((volume->composite_id.volume_id < 0) && !volume->shader_outside_printer_detection_enabled))
+    for (GLVolume* volume : this->volumes) {
+        if (volume == nullptr || volume->is_modifier || (volume->is_wipe_tower && !volume->shader_outside_printer_detection_enabled) || (volume->composite_id.volume_id < 0 && !volume->shader_outside_printer_detection_enabled))
             continue;
 
         const BoundingBoxf3& bb = volume->transformed_convex_hull_bounding_box();
@@ -1028,28 +1074,6 @@ size_t GLVolumeCollection::gpu_memory_used() const
 std::string GLVolumeCollection::log_memory_info() const 
 { 
 	return " (GLVolumeCollection RAM: " + format_memsize_MB(this->cpu_memory_used()) + " GPU: " + format_memsize_MB(this->gpu_memory_used()) + " Both: " + format_memsize_MB(this->gpu_memory_used()) + ")";
-}
-
-bool can_export_to_obj(const GLVolume& volume)
-{
-    if (!volume.is_active || !volume.is_extrusion_path)
-        return false;
-
-    bool has_triangles = !volume.indexed_vertex_array.triangle_indices.empty() || (std::min(volume.indexed_vertex_array.triangle_indices_size, volume.tverts_range.second - volume.tverts_range.first) > 0);
-    bool has_quads = !volume.indexed_vertex_array.quad_indices.empty() || (std::min(volume.indexed_vertex_array.quad_indices_size, volume.qverts_range.second - volume.qverts_range.first) > 0);
-
-    return has_triangles || has_quads;
-}
-
-bool GLVolumeCollection::has_toolpaths_to_export() const
-{
-    for (const GLVolume* volume : this->volumes)
-    {
-        if (can_export_to_obj(*volume))
-            return true;
-    }
-
-    return false;
 }
 
 // caller is responsible for supplying NO lines with zero length

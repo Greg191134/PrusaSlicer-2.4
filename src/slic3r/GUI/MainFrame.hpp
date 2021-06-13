@@ -91,7 +91,9 @@ class MainFrame : public DPIFrame
     void on_value_changed(wxCommandEvent&);
 
     bool can_start_new_project() const;
+#if !ENABLE_PROJECT_DIRTY_STATE
     bool can_save() const;
+#endif // !ENABLE_PROJECT_DIRTY_STATE
     bool can_export_model() const;
     bool can_export_toolpaths() const;
     bool can_export_supports() const;
@@ -160,7 +162,7 @@ public:
     void        init_menubar_as_gcodeviewer();
     void        update_menubar();
 
-    void        update_ui_from_settings(bool apply_free_camera_correction = true);
+    void        update_ui_from_settings();
     bool        is_loaded() const { return m_loaded; }
     bool        is_last_input_file() const  { return !m_qs_last_input_file.IsEmpty(); }
     bool        is_dlg_layout() const { return m_layout == ESettingsLayout::Dlg; }
@@ -183,6 +185,13 @@ public:
     void        select_view(const std::string& direction);
     // Propagate changed configuration from the Tab to the Plater and save changes to the AppConfig
     void        on_config_changed(DynamicPrintConfig* cfg) const ;
+
+#if ENABLE_PROJECT_DIRTY_STATE
+    bool can_save() const;
+    bool can_save_as() const;
+    void save_project();
+    void save_project_as(const wxString& filename = wxString());
+#endif // ENABLE_PROJECT_DIRTY_STATE
 
     void        add_to_recent_projects(const wxString& filename);
 

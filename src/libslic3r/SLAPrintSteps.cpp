@@ -3,6 +3,7 @@
 #include <libslic3r/Exception.hpp>
 #include <libslic3r/SLAPrintSteps.hpp>
 #include <libslic3r/MeshBoolean.hpp>
+#include <libslic3r/TriangleMeshSlicer.hpp>
 
 // Need the cylinder method for the the drainholes in hollowing step
 #include <libslic3r/SLA/SupportTreeBuilder.hpp>
@@ -15,9 +16,6 @@
 #include <libslic3r/AABBTreeIndirect.hpp>
 
 #include <libslic3r/ClipperUtils.hpp>
-
-// For geometry algorithms with native Clipper types (no copies and conversions)
-#include <libnest2d/backends/clipper/geometries.hpp>
 
 #include <boost/log/trivial.hpp>
 
@@ -168,8 +166,8 @@ struct FaceHash {
         Vec<3, int64_t> c = a.cross(b) + (pts[0] + pts[1] + pts[2]) / 3;
 
         // Return a concatenated string representation of the coordinates
-        return std::to_string(c(0)) + std::to_string(c(1)) + std::to_string(c(2));
-    };
+        return float_to_string_decimal_point(c(0)) + float_to_string_decimal_point(c(1)) + float_to_string_decimal_point(c(2));
+    }
 
     FaceHash(const indexed_triangle_set &its)
     {
@@ -196,18 +194,18 @@ static std::vector<bool> create_exclude_mask(
         const sla::Interior &interior,
         const std::vector<sla::DrainHole> &holes)
 {
-    FaceHash interior_hash{sla::get_mesh(interior).its};
+    FaceHash interior_hash{sla::get_mesh(interior)};
 
     std::vector<bool> exclude_mask(its.indices.size(), false);
 
-    std::vector< std::vector<size_t> > neighbor_index =
-            create_neighbor_index(its);
+    VertexFaceIndex neighbor_index{its};
 
     auto exclude_neighbors = [&neighbor_index, &exclude_mask](const Vec3i &face)
     {
         for (int i = 0; i < 3; ++i) {
-            const std::vector<size_t> &neighbors = neighbor_index[face(i)];
-            for (size_t fi_n : neighbors) exclude_mask[fi_n] = true;
+            const auto &neighbors_range = neighbor_index[face(i)];
+            for (size_t fi_n : neighbors_range)
+                exclude_mask[fi_n] = true;
         }
     };
 
@@ -362,7 +360,7 @@ void SLAPrint::Steps::drill_holes(SLAPrintObject &po)
         holept.normal += Vec3f{dist(m_rng), dist(m_rng), dist(m_rng)};
         holept.normal.normalize();
         holept.pos += Vec3f{dist(m_rng), dist(m_rng), dist(m_rng)};
-        TriangleMesh m = sla::to_triangle_mesh(holept.to_mesh());
+        TriangleMesh m{holept.to_mesh()};
         m.require_shared_vertices();
 
         part_to_drill.indices.clear();
@@ -473,25 +471,29 @@ void SLAPrint::Steps::slice_model(SLAPrintObject &po)
     for(auto it = slindex_it; it != po.m_slice_index.end(); ++it)
         po.m_model_height_levels.emplace_back(it->slice_level());
 
-    TriangleMeshSlicer slicer(&mesh);
-
     po.m_model_slices.clear();
-    float closing_r  = float(po.config().slice_closing_radius.value);
+    MeshSlicingParamsEx params;
+    params.closing_radius = float(po.config().slice_closing_radius.value);
+    switch (po.config().slicing_mode.value) {
+    case SlicingMode::Regular:    params.mode = MeshSlicingParams::SlicingMode::Regular; break;
+    case SlicingMode::EvenOdd:    params.mode = MeshSlicingParams::SlicingMode::EvenOdd; break;
+    case SlicingMode::CloseHoles: params.mode = MeshSlicingParams::SlicingMode::Positive; break;
+    }
     auto  thr        = [this]() { m_print->throw_if_canceled(); };
     auto &slice_grid = po.m_model_height_levels;
-    slicer.slice(slice_grid, SlicingMode::Regular, closing_r, &po.m_model_slices, thr);
+    assert(mesh.has_shared_vertices());
+    po.m_model_slices = slice_mesh_ex(mesh.its, slice_grid, params, thr);
 
     sla::Interior *interior = po.m_hollowing_data ?
                                   po.m_hollowing_data->interior.get() :
                                   nullptr;
 
     if (interior && ! sla::get_mesh(*interior).empty()) {
-        TriangleMesh interiormesh = sla::get_mesh(*interior);
-        interiormesh.repaired = false;
-        interiormesh.repair(true);
-        TriangleMeshSlicer interior_slicer(&interiormesh);
-        std::vector<ExPolygons> interior_slices;
-        interior_slicer.slice(slice_grid, SlicingMode::Regular, closing_r, &interior_slices, thr);
+        indexed_triangle_set interiormesh = sla::get_mesh(*interior);
+        sla::swap_normals(interiormesh);
+        params.mode = MeshSlicingParams::SlicingMode::Regular;
+
+        std::vector<ExPolygons> interior_slices = slice_mesh_ex(interiormesh, slice_grid, params, thr);
 
         sla::ccr::for_each(size_t(0), interior_slices.size(),
                            [&po, &interior_slices] (size_t i) {
@@ -665,15 +667,14 @@ void SLAPrint::Steps::generate_pad(SLAPrintObject &po) {
             // we sometimes call it "builtin pad" is enabled so we will
             // get a sample from the bottom of the mesh and use it for pad
             // creation.
-            sla::pad_blueprint(trmesh, bp, float(pad_h),
+            sla::pad_blueprint(trmesh.its, bp, float(pad_h),
                                float(po.m_config.layer_height.getFloat()),
                                [this](){ throw_if_canceled(); });
         }
 
-        po.m_supportdata->support_tree_ptr->add_pad(bp, pcfg);
-        auto &pad_mesh = po.m_supportdata->support_tree_ptr->retrieve_mesh(sla::MeshType::Pad);
+        po.m_supportdata->create_pad(bp, pcfg);
 
-        if (!validate_pad(pad_mesh, pcfg))
+        if (!validate_pad(po.m_supportdata->support_tree_ptr->retrieve_mesh(sla::MeshType::Pad), pcfg))
             throw Slic3r::SlicingError(
                     L("No pad can be generated for this model with the "
                       "current configuration"));
@@ -717,55 +718,49 @@ void SLAPrint::Steps::slice_supports(SLAPrintObject &po) {
     report_status(-2, "", SlicingStatus::RELOAD_SLA_PREVIEW);
 }
 
-using ClipperPoint  = ClipperLib::IntPoint;
-using ClipperPolygon = ClipperLib::Polygon; // see clipper_polygon.hpp in libnest2d
-using ClipperPolygons = std::vector<ClipperPolygon>;
+//static ClipperPolygons polyunion(const ClipperPolygons &subjects)
+//{
+//    ClipperLib::Clipper clipper;
 
-static ClipperPolygons polyunion(const ClipperPolygons &subjects)
-{
-    ClipperLib::Clipper clipper;
+//    bool closed = true;
 
-    bool closed = true;
+//    for(auto& path : subjects) {
+//        clipper.AddPath(path.Contour, ClipperLib::ptSubject, closed);
+//        clipper.AddPaths(path.Holes, ClipperLib::ptSubject, closed);
+//    }
 
-    for(auto& path : subjects) {
-        clipper.AddPath(path.Contour, ClipperLib::ptSubject, closed);
-        clipper.AddPaths(path.Holes, ClipperLib::ptSubject, closed);
-    }
+//    auto mode = ClipperLib::pftPositive;
 
-    auto mode = ClipperLib::pftPositive;
+//    return libnest2d::clipper_execute(clipper, ClipperLib::ctUnion, mode, mode);
+//}
 
-    return libnest2d::clipper_execute(clipper, ClipperLib::ctUnion, mode, mode);
-}
+//static ClipperPolygons polydiff(const ClipperPolygons &subjects, const ClipperPolygons& clips)
+//{
+//    ClipperLib::Clipper clipper;
 
-static ClipperPolygons polydiff(const ClipperPolygons &subjects, const ClipperPolygons& clips)
-{
-    ClipperLib::Clipper clipper;
+//    bool closed = true;
 
-    bool closed = true;
+//    for(auto& path : subjects) {
+//        clipper.AddPath(path.Contour, ClipperLib::ptSubject, closed);
+//        clipper.AddPaths(path.Holes, ClipperLib::ptSubject, closed);
+//    }
 
-    for(auto& path : subjects) {
-        clipper.AddPath(path.Contour, ClipperLib::ptSubject, closed);
-        clipper.AddPaths(path.Holes, ClipperLib::ptSubject, closed);
-    }
+//    for(auto& path : clips) {
+//        clipper.AddPath(path.Contour, ClipperLib::ptClip, closed);
+//        clipper.AddPaths(path.Holes, ClipperLib::ptClip, closed);
+//    }
 
-    for(auto& path : clips) {
-        clipper.AddPath(path.Contour, ClipperLib::ptClip, closed);
-        clipper.AddPaths(path.Holes, ClipperLib::ptClip, closed);
-    }
+//    auto mode = ClipperLib::pftPositive;
 
-    auto mode = ClipperLib::pftPositive;
-
-    return libnest2d::clipper_execute(clipper, ClipperLib::ctDifference, mode, mode);
-}
+//    return libnest2d::clipper_execute(clipper, ClipperLib::ctDifference, mode, mode);
+//}
 
 // get polygons for all instances in the object
-static ClipperPolygons get_all_polygons(const SliceRecord& record, SliceOrigin o)
+static ExPolygons get_all_polygons(const SliceRecord& record, SliceOrigin o)
 {
-    namespace sl = libnest2d::sl;
-
     if (!record.print_obj()) return {};
 
-    ClipperPolygons polygons;
+    ExPolygons polygons;
     auto &input_polygons = record.get_slice(o);
     auto &instances = record.print_obj()->instances();
     bool is_lefthanded = record.print_obj()->is_left_handed();
@@ -776,43 +771,42 @@ static ClipperPolygons get_all_polygons(const SliceRecord& record, SliceOrigin o
 
         for (size_t i = 0; i < instances.size(); ++i)
         {
-            ClipperPolygon poly;
+            ExPolygon poly;
 
             // We need to reverse if is_lefthanded is true but
             bool needreverse = is_lefthanded;
 
             // should be a move
-            poly.Contour.reserve(polygon.contour.size() + 1);
+            poly.contour.points.reserve(polygon.contour.size() + 1);
 
             auto& cntr = polygon.contour.points;
             if(needreverse)
                 for(auto it = cntr.rbegin(); it != cntr.rend(); ++it)
-                    poly.Contour.emplace_back(it->x(), it->y());
+                    poly.contour.points.emplace_back(it->x(), it->y());
             else
                 for(auto& p : cntr)
-                    poly.Contour.emplace_back(p.x(), p.y());
+                    poly.contour.points.emplace_back(p.x(), p.y());
 
             for(auto& h : polygon.holes) {
-                poly.Holes.emplace_back();
-                auto& hole = poly.Holes.back();
-                hole.reserve(h.points.size() + 1);
+                poly.holes.emplace_back();
+                auto& hole = poly.holes.back();
+                hole.points.reserve(h.points.size() + 1);
 
                 if(needreverse)
                     for(auto it = h.points.rbegin(); it != h.points.rend(); ++it)
-                        hole.emplace_back(it->x(), it->y());
+                        hole.points.emplace_back(it->x(), it->y());
                 else
                     for(auto& p : h.points)
-                        hole.emplace_back(p.x(), p.y());
+                        hole.points.emplace_back(p.x(), p.y());
             }
 
             if(is_lefthanded) {
-                for(auto& p : poly.Contour) p.X = -p.X;
-                for(auto& h : poly.Holes) for(auto& p : h) p.X = -p.X;
+                for(auto& p : poly.contour) p.x() = -p.x();
+                for(auto& h : poly.holes) for(auto& p : h) p.x() = -p.x();
             }
 
-            sl::rotate(poly, double(instances[i].rotation));
-            sl::translate(poly, ClipperPoint{instances[i].shift.x(),
-                                             instances[i].shift.y()});
+            poly.rotate(double(instances[i].rotation));
+            poly.translate(Point{instances[i].shift.x(), instances[i].shift.y()});
 
             polygons.emplace_back(std::move(poly));
         }
@@ -878,9 +872,6 @@ void SLAPrint::Steps::merge_slices_and_eval_stats() {
 
     print_statistics.clear();
 
-    // libnest calculates positive area for clockwise polygons, Slic3r is in counter-clockwise
-    auto areafn = [](const ClipperPolygon& poly) { return - libnest2d::sl::area(poly); };
-
     const double area_fill = printer_config.area_fill.getFloat()*0.01;// 0.5 (50%);
     const double fast_tilt = printer_config.fast_tilt_time.getFloat();// 5.0;
     const double slow_tilt = printer_config.slow_tilt_time.getFloat();// 8.0;
@@ -913,7 +904,7 @@ void SLAPrint::Steps::merge_slices_and_eval_stats() {
     // Going to parallel:
     auto printlayerfn = [this,
             // functions and read only vars
-            areafn, area_fill, display_area, exp_time, init_exp_time, fast_tilt, slow_tilt, delta_fade_time,
+            area_fill, display_area, exp_time, init_exp_time, fast_tilt, slow_tilt, delta_fade_time,
 
             // write vars
             &mutex, &models_volume, &supports_volume, &estim_time, &slow_layers,
@@ -931,8 +922,8 @@ void SLAPrint::Steps::merge_slices_and_eval_stats() {
 
         // Calculation of the consumed material
 
-        ClipperPolygons model_polygons;
-        ClipperPolygons supports_polygons;
+        ExPolygons model_polygons;
+        ExPolygons supports_polygons;
 
         size_t c = std::accumulate(layer.slices().begin(),
                                    layer.slices().end(),
@@ -954,44 +945,44 @@ void SLAPrint::Steps::merge_slices_and_eval_stats() {
 
         for(const SliceRecord& record : layer.slices()) {
 
-            ClipperPolygons modelslices = get_all_polygons(record, soModel);
-            for(ClipperPolygon& p_tmp : modelslices) model_polygons.emplace_back(std::move(p_tmp));
+            ExPolygons modelslices = get_all_polygons(record, soModel);
+            for(ExPolygon& p_tmp : modelslices) model_polygons.emplace_back(std::move(p_tmp));
 
-            ClipperPolygons supportslices = get_all_polygons(record, soSupport);
-            for(ClipperPolygon& p_tmp : supportslices) supports_polygons.emplace_back(std::move(p_tmp));
+            ExPolygons supportslices = get_all_polygons(record, soSupport);
+            for(ExPolygon& p_tmp : supportslices) supports_polygons.emplace_back(std::move(p_tmp));
 
         }
 
-        model_polygons = polyunion(model_polygons);
+        model_polygons = union_ex(model_polygons);
         double layer_model_area = 0;
-        for (const ClipperPolygon& polygon : model_polygons)
-            layer_model_area += areafn(polygon);
+        for (const ExPolygon& polygon : model_polygons)
+            layer_model_area += area(polygon);
 
         if (layer_model_area < 0 || layer_model_area > 0) {
             Lock lck(mutex); models_volume += layer_model_area * l_height;
         }
 
         if(!supports_polygons.empty()) {
-            if(model_polygons.empty()) supports_polygons = polyunion(supports_polygons);
-            else supports_polygons = polydiff(supports_polygons, model_polygons);
+            if(model_polygons.empty()) supports_polygons = union_ex(supports_polygons);
+            else supports_polygons = diff_ex(supports_polygons, model_polygons);
             // allegedly, union of subject is done withing the diff according to the pftPositive polyFillType
         }
 
         double layer_support_area = 0;
-        for (const ClipperPolygon& polygon : supports_polygons)
-            layer_support_area += areafn(polygon);
+        for (const ExPolygon& polygon : supports_polygons)
+            layer_support_area += area(polygon);
 
         if (layer_support_area < 0 || layer_support_area > 0) {
             Lock lck(mutex); supports_volume += layer_support_area * l_height;
         }
 
         // Here we can save the expensively calculated polygons for printing
-        ClipperPolygons trslices;
+        ExPolygons trslices;
         trslices.reserve(model_polygons.size() + supports_polygons.size());
-        for(ClipperPolygon& poly : model_polygons) trslices.emplace_back(std::move(poly));
-        for(ClipperPolygon& poly : supports_polygons) trslices.emplace_back(std::move(poly));
+        for(ExPolygon& poly : model_polygons) trslices.emplace_back(std::move(poly));
+        for(ExPolygon& poly : supports_polygons) trslices.emplace_back(std::move(poly));
 
-        layer.transformed_slices(polyunion(trslices));
+        layer.transformed_slices(union_ex(trslices));
 
         // Calculation of the slow and fast layers to the future controlling those values on FW
 
@@ -1074,7 +1065,7 @@ void SLAPrint::Steps::rasterize()
         PrintLayer& printlayer = m_print->m_printer_input[idx];
         if(canceled()) return;
 
-        for (const ClipperLib::Polygon& poly : printlayer.transformed_slices())
+        for (const ExPolygon& poly : printlayer.transformed_slices())
             raster.draw(poly);
 
         // Status indication guarded with the spinlock

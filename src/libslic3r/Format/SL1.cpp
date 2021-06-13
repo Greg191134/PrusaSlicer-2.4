@@ -248,7 +248,7 @@ std::vector<ExPolygons> extract_slices_from_sla_archive(
     {
         double          incr, val, prev;
         bool            stop = false;
-        tbb::spin_mutex mutex;
+        tbb::spin_mutex mutex = {};
     } st {100. / slices.size(), 0., 0.};
 
     tbb::parallel_for(size_t(0), arch.images.size(),
@@ -296,7 +296,7 @@ void import_sla_archive(const std::string &zipfname, DynamicPrintConfig &out)
 void import_sla_archive(
     const std::string &      zipfname,
     Vec2i                    windowsize,
-    TriangleMesh &           out,
+    indexed_triangle_set &           out,
     DynamicPrintConfig &     profile,
     std::function<bool(int)> progr)
 {
@@ -316,7 +316,7 @@ void import_sla_archive(
         extract_slices_from_sla_archive(arch, rstp, progr);
 
     if (!slices.empty())
-        out = slices_to_triangle_mesh(slices, 0, slicp.layerh, slicp.initial_layerh);
+        out = slices_to_mesh(slices, 0, slicp.layerh, slicp.initial_layerh);
 }
 
 using ConfMap = std::map<std::string, std::string>;
@@ -345,6 +345,7 @@ std::string get_cfg_value(const DynamicPrintConfig &cfg, const std::string &key)
 
 void fill_iniconf(ConfMap &m, const SLAPrint &print)
 {
+    CNumericLocalesSetter locales_setter; // for to_string
     auto &cfg = print.full_print_config();
     m["layerHeight"]    = get_cfg_value(cfg, "layer_height");
     m["expTime"]        = get_cfg_value(cfg, "exposure_time");
@@ -371,6 +372,13 @@ void fill_iniconf(ConfMap &m, const SLAPrint &print)
     m["numSlow"]      = std::to_string(stats.slow_layers_count);
     m["numFast"]      = std::to_string(stats.fast_layers_count);
     m["printTime"]    = std::to_string(stats.estimated_print_time);
+
+    bool hollow_en = false;
+    auto it = print.objects().begin();
+    while (!hollow_en && it != print.objects().end())
+        hollow_en = (*it++)->config().hollowing_enable;
+
+    m["hollow"] = hollow_en ? "1" : "0";
     
     m["action"] = "print";
 }
