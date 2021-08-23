@@ -1,5 +1,5 @@
 #include "LocalesUtils.hpp"
-
+#include <sstream>
 #include <stdexcept>
 
 namespace Slic3r {
