@@ -20,7 +20,8 @@
 class wxMenuItem;
 class wxMenuBar;
 class wxTopLevelWindow;
-class wxNotebook;
+class wxDataViewCtrl;
+class wxBookCtrlBase;
 struct wxLanguageInfo;
 
 namespace Slic3r {
@@ -58,13 +59,16 @@ enum FileType
     FT_GCODE,
     FT_MODEL,
     FT_PROJECT,
+    FT_GALLERY,
 
     FT_INI,
     FT_SVG,
 
     FT_TEX,
 
-    FT_PNGZIP,
+    FT_SL1,
+	// Workaround for OSX file picker, for some reason it always saves with the 1st extension.
+ 	FT_SL1S,
 
     FT_SIZE,
 };
@@ -118,6 +122,14 @@ private:
     wxColour        m_color_label_modified;
     wxColour        m_color_label_sys;
     wxColour        m_color_label_default;
+    wxColour        m_color_window_default;
+#ifdef _WIN32
+    wxColour        m_color_highlight_label_default;
+    wxColour        m_color_hovered_btn_label;
+    wxColour        m_color_highlight_default;
+    wxColour        m_color_selected_btn_bg;
+    bool            m_force_colors_update { false };
+#endif
 
     wxFont		    m_small_font;
     wxFont		    m_bold_font;
@@ -167,9 +179,19 @@ public:
 
     static unsigned get_colour_approx_luma(const wxColour &colour);
     static bool     dark_mode();
+    const wxColour  get_label_default_clr_system();
+    const wxColour  get_label_default_clr_modified();
     void            init_label_colours();
     void            update_label_colours_from_appconfig();
     void            update_label_colours();
+    // update color mode for window
+    void            UpdateDarkUI(wxWindow *window, bool highlited = false, bool just_font = false);
+    // update color mode for whole dialog including all children
+    void            UpdateDlgDarkUI(wxDialog* dlg, bool just_buttons_update = false);
+    // update color mode for DataViewControl
+    void            UpdateDVCDarkUI(wxDataViewCtrl* dvc, bool highlited = false);
+    // update color mode for panel including all static texts controls
+    void            UpdateAllStaticTextDarkUI(wxWindow* parent);
     void            init_fonts();
 	void            update_fonts(const MainFrame *main_frame = nullptr);
     void            set_label_clr_modified(const wxColour& clr);
@@ -178,12 +200,23 @@ public:
     const wxColour& get_label_clr_modified(){ return m_color_label_modified; }
     const wxColour& get_label_clr_sys()     { return m_color_label_sys; }
     const wxColour& get_label_clr_default() { return m_color_label_default; }
+    const wxColour& get_window_default_clr(){ return m_color_window_default; }
+
+
+#ifdef _WIN32
+    const wxColour& get_label_highlight_clr()   { return m_color_highlight_label_default; }
+    const wxColour& get_highlight_default_clr() { return m_color_highlight_default; }
+    const wxColour& get_color_hovered_btn_label() { return m_color_hovered_btn_label; }
+    const wxColour& get_color_selected_btn_bg() { return m_color_selected_btn_bg; }
+    void            force_colors_update();
+#endif
 
     const wxFont&   small_font()            { return m_small_font; }
     const wxFont&   bold_font()             { return m_bold_font; }
     const wxFont&   normal_font()           { return m_normal_font; }
     const wxFont&   code_font()             { return m_code_font; }
     int             em_unit() const         { return m_em_unit; }
+    bool            tabs_as_menu() const;
     wxSize          get_min_size() const;
     float           toolbar_icon_scale(const bool is_limited = false) const;
     void            set_auto_toolbar_icon_scale(float scale) const;
@@ -210,23 +243,22 @@ public:
     void            update_mode();
 
     void            add_config_menu(wxMenuBar *menu);
-#if ENABLE_PROJECT_DIRTY_STATE
     bool            has_unsaved_preset_changes() const;
     bool            has_current_preset_changes() const;
     void            update_saved_preset_from_current_preset();
     std::vector<std::pair<unsigned int, std::string>> get_selected_presets() const;
     bool            check_and_save_current_preset_changes(const wxString& header = wxString());
-#else
-    bool            check_unsaved_changes(const wxString& header = wxString());
-#endif // ENABLE_PROJECT_DIRTY_STATE
     bool            check_print_host_queue();
     bool            checked_tab(Tab* tab);
     void            load_current_presets(bool check_printer_presets = true);
+    void            update_wizard_from_config();
 
     wxString        current_language_code() const { return m_wxLocale->GetCanonicalName(); }
 	// Translate the language code to a code, for which Prusa Research maintains translations. Defaults to "en_US".
     wxString 		current_language_code_safe() const;
     bool            is_localized() const { return m_wxLocale->GetLocale() != "English"; }
+
+    void            open_preferences(size_t open_on_tab = 0);
 
     virtual bool OnExceptionInMainLoop() override;
 
@@ -246,7 +278,7 @@ public:
     NotificationManager* notification_manager();
 
     // Parameters extracted from the command line to be passed to GUI after initialization.
-    const GUI_InitParams* init_params { nullptr };
+    GUI_InitParams* init_params { nullptr };
 
     AppConfig*      app_config{ nullptr };
     PresetBundle*   preset_bundle{ nullptr };
@@ -254,9 +286,9 @@ public:
     MainFrame*      mainframe{ nullptr };
     Plater*         plater_{ nullptr };
 
-	PresetUpdater* get_preset_updater() { return preset_updater; }
+	PresetUpdater*  get_preset_updater() { return preset_updater; }
 
-    wxNotebook*     tab_panel() const ;
+    wxBookCtrlBase* tab_panel() const ;
     int             extruders_cnt() const;
     int             extruders_edited_cnt() const;
 

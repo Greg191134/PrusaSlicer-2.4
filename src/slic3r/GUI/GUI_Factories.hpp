@@ -25,7 +25,7 @@ struct SettingsFactory
     typedef std::map<std::string, std::vector<std::string>> Bundle;
     static std::map<std::string, std::string>               CATEGORY_ICON;
 
-    static wxBitmap                             get_category_bitmap(const std::string& category_name);
+    static wxBitmap                             get_category_bitmap(const std::string& category_name, bool menu_bmp = true);
     static Bundle                               get_bundle(const DynamicPrintConfig* config, bool is_object_settings);
     static std::vector<std::string>             get_options(bool is_part);
 };
@@ -40,8 +40,13 @@ public:
     ~MenuFactory() = default;
 
     void    init(wxWindow* parent);
+    void    update();
     void    update_object_menu();
+    void    update_default_menu();
     void    msw_rescale();
+    void    sys_color_changed();
+
+    static void sys_color_changed(wxMenuBar* menu_bar);
 
     wxMenu* default_menu();
     wxMenu* object_menu();
@@ -87,8 +92,10 @@ private:
     wxMenuItem* append_menu_item_printable(wxMenu* menu);
     void        append_menu_items_osx(wxMenu* menu);
     wxMenuItem* append_menu_item_fix_through_netfabb(wxMenu* menu);
+    wxMenuItem* append_menu_item_simplify(wxMenu* menu);
     void        append_menu_item_export_stl(wxMenu* menu);
     void        append_menu_item_reload_from_disk(wxMenu* menu);
+    void        append_menu_item_replace_with_stl(wxMenu* menu);
     void        append_menu_item_change_extruder(wxMenu* menu);
     void        append_menu_item_delete(wxMenu* menu);
     void        append_menu_item_scale_selection_to_fit_print_volume(wxMenu* menu);

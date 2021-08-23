@@ -14,9 +14,10 @@ namespace GUI {
 Bed_2D::Bed_2D(wxWindow* parent) : 
 wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(25 * wxGetApp().em_unit(), -1), wxTAB_TRAVERSAL)
 {
-    SetBackgroundStyle(wxBG_STYLE_PAINT); // to avoid assert message after wxAutoBufferedPaintDC 
 #ifdef __APPLE__
     m_user_drawn_background = false;
+#else
+    SetBackgroundStyle(wxBG_STYLE_PAINT); // to avoid assert message after wxAutoBufferedPaintDC 
 #endif /*__APPLE__*/
 }
 
@@ -33,7 +34,11 @@ void Bed_2D::repaint(const std::vector<Vec2d>& shape)
 		// On MacOS the background is erased, on Windows the background is not erased
 		// and on Linux / GTK the background is erased to gray color.
 		// Fill DC with the background on Windows & Linux / GTK.
+#ifdef _WIN32
+		auto color = wxGetApp().get_highlight_default_clr();
+#else
 		auto color = wxSystemSettings::GetColour(wxSYS_COLOUR_3DLIGHT); //GetSystemColour
+#endif
 		dc.SetPen(*new wxPen(color, 1, wxPENSTYLE_SOLID));
 		dc.SetBrush(*new wxBrush(color, wxBRUSHSTYLE_SOLID));
 		auto rect = GetUpdateRegion().GetBox();

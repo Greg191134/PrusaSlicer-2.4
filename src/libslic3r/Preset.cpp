@@ -625,17 +625,13 @@ const std::vector<std::string>& Preset::sla_printer_options()
 PresetCollection::PresetCollection(Preset::Type type, const std::vector<std::string> &keys, const Slic3r::StaticPrintConfig &defaults, const std::string &default_name) :
     m_type(type),
     m_edited_preset(type, "", false),
-#if ENABLE_PROJECT_DIRTY_STATE
     m_saved_preset(type, "", false),
-#endif // ENABLE_PROJECT_DIRTY_STATE
     m_idx_selected(0)
 {
     // Insert just the default preset.
     this->add_default_preset(keys, defaults, default_name);
     m_edited_preset.config.apply(m_presets.front().config);
-#if ENABLE_PROJECT_DIRTY_STATE
     update_saved_preset_from_current_preset();
-#endif // ENABLE_PROJECT_DIRTY_STATE
 }
 
 void PresetCollection::reset(bool delete_files)
@@ -666,7 +662,9 @@ void PresetCollection::add_default_preset(const std::vector<std::string> &keys, 
 
 // Load all presets found in dir_path.
 // Throws an exception on error.
-void PresetCollection::load_presets(const std::string &dir_path, const std::string &subdir)
+void PresetCollection::load_presets(
+    const std::string &dir_path, const std::string &subdir, 
+    PresetsConfigSubstitutions& substitutions, ForwardCompatibilitySubstitutionRule substitution_rule)
 {
     // Don't use boost::filesystem::canonical() on Windows, it is broken in regard to reparse points,
     // see https://github.com/prusa3d/PrusaSlicer/issues/732
@@ -693,7 +691,9 @@ void PresetCollection::load_presets(const std::string &dir_path, const std::stri
                 // Load the preset file, apply preset values on top of defaults.
                 try {
                     DynamicPrintConfig config;
-                    config.load_from_ini(preset.file);
+                    ConfigSubstitutions config_substitutions = config.load_from_ini(preset.file, substitution_rule);
+                    if (! config_substitutions.empty())
+                        substitutions.push_back({ preset.name, m_type, PresetConfigSubstitutions::Source::UserFile, preset.file, std::move(config_substitutions) });
                     // Find a default preset for the config. The PrintPresetCollection provides different default preset based on the "printer_technology" field.
                     const Preset &default_preset = this->default_preset_for(config);
                     preset.config = default_preset.config;
@@ -812,10 +812,8 @@ std::pair<Preset*, bool> PresetCollection::load_external_preset(
             // The source config may contain keys from many possible preset types. Just copy those that relate to this preset.
             this->get_edited_preset().config.apply_only(combined_config, keys, true);
             this->update_dirty();
-#if ENABLE_PROJECT_DIRTY_STATE
             update_saved_preset_from_current_preset();
-#endif // ENABLE_PROJECT_DIRTY_STATE
-                assert(this->get_edited_preset().is_dirty);
+            assert(this->get_edited_preset().is_dirty);
             return std::make_pair(&(*it), this->get_edited_preset().is_dirty);
         }
         if (inherits.empty()) {
@@ -1196,21 +1194,38 @@ inline t_config_option_keys deep_diff(const ConfigBase &config_this, const Confi
     return diff;
 }
 
+static constexpr const std::initializer_list<const char*> optional_keys { "compatible_prints", "compatible_printers" };
+
+bool PresetCollection::is_dirty(const Preset *edited, const Preset *reference)
+{
+    if (edited != nullptr && reference != nullptr) {
+        // Only compares options existing in both configs.
+        if (! reference->config.equals(edited->config))
+            return true;
+        // The "compatible_printers" option key is handled differently from the others:
+        // It is not mandatory. If the key is missing, it means it is compatible with any printer.
+        // If the key exists and it is empty, it means it is compatible with no printer.
+        for (auto &opt_key : optional_keys)
+            if (reference->config.has(opt_key) != edited->config.has(opt_key))
+                return true;
+    }
+    return false;
+}
+
 std::vector<std::string> PresetCollection::dirty_options(const Preset *edited, const Preset *reference, const bool deep_compare /*= false*/)
 {
     std::vector<std::string> changed;
     if (edited != nullptr && reference != nullptr) {
+        // Only compares options existing in both configs.
         changed = deep_compare ?
                 deep_diff(edited->config, reference->config) :
                 reference->config.diff(edited->config);
         // The "compatible_printers" option key is handled differently from the others:
         // It is not mandatory. If the key is missing, it means it is compatible with any printer.
         // If the key exists and it is empty, it means it is compatible with no printer.
-        std::initializer_list<const char*> optional_keys { "compatible_prints", "compatible_printers" };
-        for (auto &opt_key : optional_keys) {
+        for (auto &opt_key : optional_keys)
             if (reference->config.has(opt_key) != edited->config.has(opt_key))
                 changed.emplace_back(opt_key);
-        }
     }
     return changed;
 }
@@ -1225,9 +1240,7 @@ Preset& PresetCollection::select_preset(size_t idx)
         idx = first_visible_idx();
     m_idx_selected = idx;
     m_edited_preset = m_presets[idx];
-#if ENABLE_PROJECT_DIRTY_STATE
     update_saved_preset_from_current_preset();
-#endif // ENABLE_PROJECT_DIRTY_STATE
     bool default_visible = ! m_default_suppressed || m_idx_selected < m_num_default_presets;
     for (size_t i = 0; i < m_num_default_presets; ++i)
         m_presets[i].is_visible = default_visible;
@@ -1389,12 +1402,16 @@ const Preset& PrinterPresetCollection::default_preset_for(const DynamicPrintConf
     return this->default_preset((opt_printer_technology == nullptr || opt_printer_technology->value == ptFFF) ? 0 : 1);
 }
 
-const Preset* PrinterPresetCollection::find_by_model_id(const std::string &model_id) const
+const Preset* PrinterPresetCollection::find_system_preset_by_model_and_variant(const std::string &model_id, const std::string& variant) const
 {
     if (model_id.empty()) { return nullptr; }
 
     const auto it = std::find_if(cbegin(), cend(), [&](const Preset &preset) {
-        return preset.config.opt_string("printer_model") == model_id;
+        if (!preset.is_system || preset.config.opt_string("printer_model") != model_id)
+            return false;
+        if (variant.empty())
+            return true;
+        return preset.config.opt_string("printer_variant") == variant;
     });
 
     return it != cend() ? &*it : nullptr;
@@ -1414,6 +1431,7 @@ const std::vector<std::string>& PhysicalPrinter::printer_options()
     static std::vector<std::string> s_opts;
     if (s_opts.empty()) {
         s_opts = {
+            "preset_name", // temporary option to compatibility with older Slicer
             "preset_names",
             "printer_technology",
             "host_type",
@@ -1470,6 +1488,16 @@ bool PhysicalPrinter::has_empty_config() const
             config.opt_string("printhost_password").empty();
 }
 
+// temporary workaround for compatibility with older Slicer
+static void update_preset_name_option(const std::set<std::string>& preset_names, DynamicPrintConfig& config)
+{
+    std::string name;
+    for (auto el : preset_names)
+        name += el + ";";
+    name.pop_back();
+    config.set_key_value("preset_name", new ConfigOptionString(name));
+}
+
 void PhysicalPrinter::update_preset_names_in_config()
 {
     if (!preset_names.empty()) {
@@ -1477,6 +1505,9 @@ void PhysicalPrinter::update_preset_names_in_config()
         values.clear();
         for (auto preset : preset_names)
             values.push_back(preset);
+
+        // temporary workaround for compatibility with older Slicer
+        update_preset_name_option(preset_names, config);
     }
 }
 
@@ -1505,9 +1536,12 @@ void PhysicalPrinter::update_from_config(const DynamicPrintConfig& new_config)
 
     if (values.empty())
         preset_names.clear();
-    else
+    else {
         for (const std::string& val : values)
             preset_names.emplace(val);
+        // temporary workaround for compatibility with older Slicer
+        update_preset_name_option(preset_names, config);
+    }
 }
 
 void PhysicalPrinter::reset_presets()
@@ -1580,7 +1614,9 @@ PhysicalPrinterCollection::PhysicalPrinterCollection( const std::vector<std::str
 
 // Load all printers found in dir_path.
 // Throws an exception on error.
-void PhysicalPrinterCollection::load_printers(const std::string& dir_path, const std::string& subdir)
+void PhysicalPrinterCollection::load_printers(
+    const std::string& dir_path, const std::string& subdir, 
+    PresetsConfigSubstitutions& substitutions, ForwardCompatibilitySubstitutionRule substitution_rule)
 {
     // Don't use boost::filesystem::canonical() on Windows, it is broken in regard to reparse points,
     // see https://github.com/prusa3d/PrusaSlicer/issues/732
@@ -1606,7 +1642,9 @@ void PhysicalPrinterCollection::load_printers(const std::string& dir_path, const
                 // Load the preset file, apply preset values on top of defaults.
                 try {
                     DynamicPrintConfig config;
-                    config.load_from_ini(printer.file);
+                    ConfigSubstitutions config_substitutions = config.load_from_ini(printer.file, substitution_rule);
+                    if (! config_substitutions.empty())
+                        substitutions.push_back({ name, Preset::TYPE_PHYSICAL_PRINTER, PresetConfigSubstitutions::Source::UserFile, printer.file, std::move(config_substitutions) });
                     printer.update_from_config(config);
                     printer.loaded = true;
                 }

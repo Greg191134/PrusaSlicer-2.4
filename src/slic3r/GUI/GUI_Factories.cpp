@@ -138,11 +138,11 @@ std::map<std::string, std::string> SettingsFactory::CATEGORY_ICON =
     { L("Hollowing")            , "hollowing"   }
 };
 
-wxBitmap SettingsFactory::get_category_bitmap(const std::string& category_name)
+wxBitmap SettingsFactory::get_category_bitmap(const std::string& category_name, bool menu_bmp /*= true*/)
 {
     if (CATEGORY_ICON.find(category_name) == CATEGORY_ICON.end())
         return wxNullBitmap;
-    return create_scaled_bitmap(CATEGORY_ICON.at(category_name));
+    return menu_bmp ? create_menu_bitmap(CATEGORY_ICON.at(category_name)) : create_scaled_bitmap(CATEGORY_ICON.at(category_name));
 }
 
 
@@ -206,6 +206,34 @@ static void get_full_settings_hierarchy(FullSettingsHierarchy& settings_menu, co
     }
 }
 
+static int GetSelectedChoices(  wxArrayInt& selections,
+                                const wxString& message,
+                                const wxString& caption,
+                                const wxArrayString& choices)
+{
+#ifdef _WIN32
+    wxMultiChoiceDialog dialog(nullptr, message, caption, choices);
+    wxGetApp().UpdateDlgDarkUI(&dialog);
+
+    // call this even if selections array is empty and this then (correctly)
+    // deselects the first item which is selected by default
+    dialog.SetSelections(selections);
+
+    if (dialog.ShowModal() != wxID_OK)
+    {
+        // NB: intentionally do not clear the selections array here, the caller
+        //     might want to preserve its original contents if the dialog was
+        //     cancelled
+        return -1;
+    }
+
+    selections = dialog.GetSelections();
+    return static_cast<int>(selections.GetCount());
+#else
+    return wxGetSelectedChoices(selections, message, caption, choices);
+#endif
+}
+
 static wxMenu* create_settings_popupmenu(wxMenu* parent_menu, const bool is_object_settings, wxDataViewItem item/*, ModelConfig& config*/)
 {
     wxMenu* menu = new wxMenu;
@@ -236,7 +264,7 @@ static wxMenu* create_settings_popupmenu(wxMenu* parent_menu, const bool is_obje
         }
 
         if (!category_options.empty() &&
-            wxGetSelectedChoices(selections, _L("Select showing settings"), category_name, names) != -1) {
+            GetSelectedChoices(selections, _L("Select showing settings"), category_name, names) != -1) {
             for (auto sel : selections)
                 category_options[sel].second = true;
         }
@@ -374,7 +402,7 @@ std::vector<wxBitmap> MenuFactory::get_volume_bitmaps()
     std::vector<wxBitmap> volume_bmps;
     volume_bmps.reserve(ADD_VOLUME_MENU_ITEMS.size());
     for (auto item : ADD_VOLUME_MENU_ITEMS)
-        volume_bmps.push_back(create_scaled_bitmap(item.second));
+        volume_bmps.push_back(create_menu_bitmap(item.second));
     return volume_bmps;
 }
 
@@ -403,6 +431,12 @@ wxMenu* MenuFactory::append_submenu_add_generic(wxMenu* menu, ModelVolumeType ty
             continue;
         append_menu_item(sub_menu, wxID_ANY, _(item), "",
             [type, item](wxCommandEvent&) { obj_list()->load_generic_subobject(item, type); }, "", menu);
+    }
+
+    if (wxGetApp().get_mode() >= comAdvanced) {
+        sub_menu->AppendSeparator();
+        append_menu_item(sub_menu, wxID_ANY, _L("Gallery"), "",
+            [type](wxCommandEvent&) { obj_list()->load_subobject(type, true); }, "", menu);
     }
 
     return sub_menu;
@@ -542,7 +576,7 @@ wxMenuItem* MenuFactory::append_menu_item_settings(wxMenu* menu_)
 
     // Add full settings list
     auto  menu_item = new wxMenuItem(menu, wxID_ANY, menu_name);
-    menu_item->SetBitmap(create_scaled_bitmap("cog"));
+    menu_item->SetBitmap(create_menu_bitmap("cog"));
     menu_item->SetSubMenu(create_settings_popupmenu(menu, is_object_settings, item));
 
     return menu->Append(menu_item);
@@ -623,6 +657,15 @@ wxMenuItem* MenuFactory::append_menu_item_fix_through_netfabb(wxMenu* menu)
     wxMenuItem* menu_item = append_menu_item(menu, wxID_ANY, _L("Fix through the Netfabb"), "",
         [](wxCommandEvent&) { obj_list()->fix_through_netfabb(); }, "", menu,
         []() {return plater()->can_fix_through_netfabb(); }, plater());
+
+    return menu_item;
+}
+
+wxMenuItem* MenuFactory::append_menu_item_simplify(wxMenu* menu)
+{
+    wxMenuItem* menu_item = append_menu_item(menu, wxID_ANY, _L("Simplify model"), "",
+        [](wxCommandEvent&) { obj_list()->simplify(); }, "", menu,
+        []() {return plater()->can_simplify(); }, plater());
     menu->AppendSeparator();
 
     return menu_item;
@@ -644,6 +687,13 @@ void MenuFactory::append_menu_item_reload_from_disk(wxMenu* menu)
     append_menu_item(menu, wxID_ANY, _L("Reload from disk"), _L("Reload the selected volumes from disk"),
         [](wxCommandEvent&) { plater()->reload_from_disk(); }, "", menu,
         []() { return plater()->can_reload_from_disk(); }, m_parent);
+}
+
+void MenuFactory::append_menu_item_replace_with_stl(wxMenu* menu)
+{
+    append_menu_item(menu, wxID_ANY, _L("Replace with STL"), _L("Replace the selected volume with new STL"),
+        [](wxCommandEvent&) { plater()->replace_with_stl(); }, "", menu,
+        []() { return plater()->can_replace_with_stl(); }, m_parent);
 }
 
 void MenuFactory::append_menu_item_change_extruder(wxMenu* menu)
@@ -695,7 +745,10 @@ void MenuFactory::append_menu_item_change_extruder(wxMenu* menu)
 
     }
 
-    menu->AppendSubMenu(extruder_selection_menu, name);
+    append_submenu(menu, extruder_selection_menu, wxID_ANY, name, _L("Use another extruder"),
+        "edit_uni"/* : "change_extruder"*/, []() {return true; }, GUI::wxGetApp().plater());
+
+//    menu->AppendSubMenu(extruder_selection_menu, name);
 }
 
 void MenuFactory::append_menu_item_scale_selection_to_fit_print_volume(wxMenu* menu)
@@ -824,11 +877,13 @@ void MenuFactory::create_common_object_menu(wxMenu* menu)
     menu->AppendSeparator();
 
     append_menu_item_reload_from_disk(menu);
+    append_menu_item_replace_with_stl(menu);
     append_menu_item_export_stl(menu);
     // "Scale to print volume" makes a sense just for whole object
     append_menu_item_scale_selection_to_fit_print_volume(menu);
 
     append_menu_item_fix_through_netfabb(menu);
+    append_menu_item_simplify(menu);
     append_menu_items_mirror(menu);
 }
 
@@ -875,8 +930,10 @@ void MenuFactory::create_part_menu()
 #endif // __WXOSX__
     append_menu_item_delete(menu);
     append_menu_item_reload_from_disk(menu);
+    append_menu_item_replace_with_stl(menu);
     append_menu_item_export_stl(menu);
     append_menu_item_fix_through_netfabb(menu);
+    append_menu_item_simplify(menu);
     append_menu_items_mirror(menu);
 
     append_menu_item(menu, wxID_ANY, _L("Split"), _L("Split the selected object into individual parts"),
@@ -905,6 +962,12 @@ void MenuFactory::init(wxWindow* parent)
     create_sla_object_menu();
     create_part_menu();
     create_instance_menu();
+}
+
+void MenuFactory::update()
+{
+    update_default_menu();
+    update_object_menu();
 }
 
 wxMenu* MenuFactory::default_menu()
@@ -1031,11 +1094,72 @@ void MenuFactory::update_object_menu()
     append_menu_items_add_volume(&m_object_menu);
 }
 
+void MenuFactory::update_default_menu()
+{
+    const auto menu_item_id = m_default_menu.FindItem(_("Add Shape"));
+    if (menu_item_id != wxNOT_FOUND)
+        m_default_menu.Destroy(menu_item_id);
+    create_default_menu();
+}
+
 void MenuFactory::msw_rescale()
 {
     for (MenuWithSeparators* menu : { &m_object_menu, &m_sla_object_menu, &m_part_menu, &m_default_menu })
         msw_rescale_menu(dynamic_cast<wxMenu*>(menu));
 }
+
+#ifdef _WIN32
+// For this class is used code from stackoverflow:
+// https://stackoverflow.com/questions/257288/is-it-possible-to-write-a-template-to-check-for-a-functions-existence
+// Using this code we can to inspect of an existence of IsWheelInverted() function in class T
+template <typename T>
+class menu_has_update_def_colors
+{
+    typedef char one;
+    struct two { char x[2]; };
+
+    template <typename C> static one test(decltype(&C::UpdateDefColors));
+    template <typename C> static two test(...);
+
+public:
+    static constexpr bool value = sizeof(test<T>(0)) == sizeof(char);
+};
+
+template<typename T>
+static void update_menu_item_def_colors(T* item)
+{
+    if constexpr (menu_has_update_def_colors<wxMenuItem>::value) {
+        item->UpdateDefColors();
+    }
+}
+#endif
+
+void MenuFactory::sys_color_changed()
+{
+    for (MenuWithSeparators* menu : { &m_object_menu, &m_sla_object_menu, &m_part_menu, &m_default_menu }) {
+        msw_rescale_menu(dynamic_cast<wxMenu*>(menu));// msw_rescale_menu updates just icons, so use it
+#ifdef _WIN32 
+        // but under MSW we have to update item's bachground color
+        for (wxMenuItem* item : menu->GetMenuItems())
+            update_menu_item_def_colors(item);
+#endif
+    }
+}
+
+void MenuFactory::sys_color_changed(wxMenuBar* menubar)
+{
+    for (size_t id = 0; id < menubar->GetMenuCount(); id++) {
+        wxMenu* menu = menubar->GetMenu(id);
+        msw_rescale_menu(menu);
+#ifdef _WIN32 
+        // but under MSW we have to update item's bachground color
+        for (wxMenuItem* item : menu->GetMenuItems())
+            update_menu_item_def_colors(item);
+#endif
+    }
+    menubar->Refresh();
+}
+
 
 } //namespace GUI
 } //namespace Slic3r 

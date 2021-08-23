@@ -45,6 +45,14 @@ void set_local_dir(const std::string &path);
 // Return a full path to the localization directory.
 const std::string& localization_dir();
 
+// Set a path with shapes gallery files.
+void set_sys_shapes_dir(const std::string &path);
+// Return a full path to the system shapes gallery directory.
+const std::string& sys_shapes_dir();
+
+// Return a full path to the custom shapes gallery directory.
+std::string custom_shapes_dir();
+
 // Set a path with preset files.
 void set_data_dir(const std::string &path);
 // Return a full path to the GUI resource files.
@@ -91,6 +99,10 @@ extern bool is_plain_file(const boost::filesystem::directory_entry &path);
 extern bool is_ini_file(const boost::filesystem::directory_entry &path);
 extern bool is_idx_file(const boost::filesystem::directory_entry &path);
 extern bool is_gcode_file(const std::string &path);
+extern bool is_img_file(const std::string& path);
+extern bool is_gallery_file(const boost::filesystem::directory_entry& path, char const* type);
+extern bool is_gallery_file(const std::string& path, char const* type);
+extern bool is_shapes_dir(const std::string& dir);
 
 // File path / name / extension splitting utilities, working with UTF-8,
 // to be published to Perl.
@@ -226,7 +238,7 @@ inline typename CONTAINER_TYPE::value_type& next_value_modulo(typename CONTAINER
 	return container[next_idx_modulo(idx, container.size())];
 }
 
-extern std::string xml_escape(std::string text);
+extern std::string xml_escape(std::string text, bool is_marked = false);
 
 
 #if defined __GNUC__ && __GNUC__ < 5 && !defined __clang__

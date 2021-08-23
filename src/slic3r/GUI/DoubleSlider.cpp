@@ -11,6 +11,7 @@
 #include "GUI_Utils.hpp"
 #include "MsgDialog.hpp"
 #include "Tab.hpp"
+#include "GUI_ObjectList.hpp"
 
 #include <wx/button.h>
 #include <wx/dialog.h>
@@ -24,6 +25,7 @@
 
 #include <cmath>
 #include <boost/algorithm/string/replace.hpp>
+#include <random>
 #include "Field.hpp"
 #include "format.hpp"
 #include "NotificationManager.hpp"
@@ -164,6 +166,8 @@ void Control::msw_rescale()
 
 void Control::sys_color_changed()
 {
+    GUI::wxGetApp().UpdateDarkUI(GetParent());
+
     m_bmp_add_tick_on .msw_rescale();
     m_bmp_add_tick_off.msw_rescale();
     m_bmp_del_tick_on .msw_rescale();
@@ -380,7 +384,11 @@ void Control::SetTicksValues(const Info& custom_gcode_per_print_z)
         // Switch to the "Feature type"/"Tool" from the very beginning of a new object slicing after deleting of the old one
         post_ticks_changed_event();
 
-    if (custom_gcode_per_print_z.mode)
+    // init extruder sequence in respect to the extruders count 
+    if (m_ticks.empty())
+        m_extruders_sequence.init(m_extruder_colors.size());
+
+    if (custom_gcode_per_print_z.mode && !custom_gcode_per_print_z.gcodes.empty())
         m_ticks.mode = custom_gcode_per_print_z.mode;
 
     Refresh();
@@ -435,7 +443,7 @@ void Control::SetModeAndOnlyExtruder(const bool is_one_extruder_printed_model, c
     m_mode = !is_one_extruder_printed_model ? MultiExtruder :
              only_extruder < 0              ? SingleExtruder :
                                               MultiAsSingle;
-    if (!m_ticks.mode)
+    if (!m_ticks.mode || (m_ticks.empty() && m_ticks.mode != m_mode))
         m_ticks.mode = m_mode;
     m_only_extruder = only_extruder;
 
@@ -493,7 +501,7 @@ void Control::draw_focus_rect()
 void Control::render()
 {
 #ifdef _WIN32 
-    SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    GUI::wxGetApp().UpdateDarkUI(this);
 #else
     SetBackgroundColour(GetParent()->GetBackgroundColour());
 #endif // _WIN32 
@@ -542,7 +550,8 @@ bool Control::is_wipe_tower_layer(int tick) const
         return false;
     if (tick == 0 || (tick == (int)m_values.size() - 1 && m_values[tick] > m_values[tick - 1]))
         return false;
-    if (m_values[tick - 1] == m_values[tick + 1] && m_values[tick] < m_values[tick + 1])
+    if ((m_values[tick - 1] == m_values[tick + 1] && m_values[tick] < m_values[tick + 1]) ||
+        (tick > 0 && m_values[tick] < m_values[tick - 1]) ) // if there is just one wiping on the layer 
         return true;
 
     return false;
@@ -731,26 +740,18 @@ wxString Control::get_label(int tick, LabelType label_type/* = ltHeightWithLayer
             it = std::lower_bound(m_values.begin(), m_values.end(), layer_print_z - epsilon());
             if (it == m_values.end())
                 return size_t(-1);
-            return size_t(value + 1);
+            return size_t(value);
         }
-        return size_t(it - m_layers_values.begin()+1);
+        return size_t(it - m_layers_values.begin());
     };
 
-#if ENABLE_GCODE_LINES_ID_IN_H_SLIDER
-    if (m_draw_mode == dmSequentialGCodeView) {
-        return (Slic3r::GUI::get_app_config()->get("seq_top_gcode_indices") == "1") ?
-            wxString::Format("%lu", static_cast<unsigned long>(m_alternate_values[value])) :
-            wxString::Format("%lu", static_cast<unsigned long>(m_values[value]));
-    }
-#else
     if (m_draw_mode == dmSequentialGCodeView)
-        return wxString::Format("%lu", static_cast<unsigned long>(m_values[value]));
-#endif // ENABLE_GCODE_LINES_ID_IN_H_SLIDER
+        return wxString::Format("%lu", static_cast<unsigned long>(m_alternate_values[value]));
     else {
         if (label_type == ltEstimatedTime) {
             if (m_is_wipe_tower) {
                 size_t layer_number = get_layer_number(value, label_type);
-                return layer_number == size_t(-1) ? "" : short_and_splitted_time(get_time_dhms(m_layers_times[layer_number]));
+                return (layer_number == size_t(-1) || layer_number == m_layers_times.size()) ? "" : short_and_splitted_time(get_time_dhms(m_layers_times[layer_number]));
             }
             return value < m_layers_times.size() ? short_and_splitted_time(get_time_dhms(m_layers_times[value])) : "";
         }
@@ -760,7 +761,7 @@ wxString Control::get_label(int tick, LabelType label_type/* = ltHeightWithLayer
         if (label_type == ltHeight)
             return str;
         if (label_type == ltHeightWithLayer) {
-            size_t layer_number = m_is_wipe_tower ? get_layer_number(value, label_type) : (m_values.empty() ? value : value + 1);
+            size_t layer_number = m_is_wipe_tower ? get_layer_number(value, label_type) + 1 : (m_values.empty() ? value : value + 1);
             return format_wxstr("%1%\n(%2%)", str, layer_number);
         }
     }
@@ -989,11 +990,7 @@ void Control::draw_colored_band(wxDC& dc)
 
     // don't color a band for MultiExtruder mode
     if (m_ticks.empty() || m_mode == MultiExtruder) {
-#ifdef _WIN32 
-        draw_band(dc, wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW), main_band);
-#else
         draw_band(dc, GetParent()->GetBackgroundColour(), main_band);
-#endif // _WIN32 
         return;
     }
 
@@ -1086,7 +1083,9 @@ void Control::draw_ruler(wxDC& dc)
 {
     if (m_values.empty())
         return;
-    m_ruler.update(this->GetParent(), m_values, get_scroll_step());
+    // When "No sparce layer" is enabled, use m_layers_values for ruler update. 
+    // Because of m_values has duplicate values in this case.
+    m_ruler.update(this->GetParent(), m_layers_values.empty() ? m_values : m_layers_values, get_scroll_step());
 
     int height, width;
     get_size(&width, &height);
@@ -1557,6 +1556,9 @@ void Control::OnMotion(wxMouseEvent& event)
     event.Skip();
 
     // Set tooltips with information for each icon
+#if ENABLE_FIX_IMPORTING_COLOR_PRINT_VIEW_INTO_GCODEVIEWER
+    if (GUI::wxGetApp().is_editor())
+#endif // ENABLE_FIX_IMPORTING_COLOR_PRINT_VIEW_INTO_GCODEVIEWER
     this->SetToolTip(get_tooltip(tick));
 
     if (action) {
@@ -1592,12 +1594,9 @@ void Control::append_change_extruder_menu_item(wxMenu* menu, bool switch_current
                                                    (switch_current_code ? _L("Switch code to Change extruder") : _L("Change extruder") ) : 
                                                    _L("Change extruder (N/A)");
 
-        wxMenuItem* change_extruder_menu_item = menu->AppendSubMenu(change_extruder_menu, change_extruder_menu_name, _L("Use another extruder"));
-        change_extruder_menu_item->SetBitmap(create_scaled_bitmap(active_extruders[1] > 0 ? "edit_uni" : "change_extruder"));
-
-        GUI::wxGetApp().plater()->Bind(wxEVT_UPDATE_UI, [this, change_extruder_menu_item](wxUpdateUIEvent& evt) {
-            enable_menu_item(evt, [this]() {return m_mode == MultiAsSingle; }, change_extruder_menu_item, this); },
-            change_extruder_menu_item->GetId());
+        append_submenu(menu, change_extruder_menu, wxID_ANY, change_extruder_menu_name, _L("Use another extruder"),
+            active_extruders[1] > 0 ? "edit_uni" : "change_extruder",
+            [this]() {return m_mode == MultiAsSingle && !GUI::wxGetApp().obj_list()->has_paint_on_segmentation(); }, GUI::wxGetApp().plater());
     }
 }
 
@@ -1625,7 +1624,7 @@ void Control::append_add_color_change_menu_item(wxMenu* menu, bool switch_curren
                                    format_wxstr(_L("Switch code to Color change (%1%) for:"), gcode(ColorChange)) : 
                                    format_wxstr(_L("Add color change (%1%) for:"), gcode(ColorChange));
         wxMenuItem* add_color_change_menu_item = menu->AppendSubMenu(add_color_change_menu, menu_name, "");
-        add_color_change_menu_item->SetBitmap(create_scaled_bitmap("colorchange_add_m"));
+        add_color_change_menu_item->SetBitmap(create_menu_bitmap("colorchange_add_m"));
     }
 }
 
@@ -2014,11 +2013,11 @@ void Control::show_cog_icon_context_menu()
             []() { return true; }, [this]() { return m_extra_style == 0; }, GUI::wxGetApp().plater());
 
         append_menu_check_item(ruler_mode_menu, wxID_ANY, _L("Show object height"), _L("Show object height on the ruler"),
-            [this](wxCommandEvent&) { m_extra_style & wxSL_AUTOTICKS ? m_extra_style &= wxSL_AUTOTICKS : m_extra_style |= wxSL_AUTOTICKS; }, ruler_mode_menu,
+            [this](wxCommandEvent&) { m_extra_style & wxSL_AUTOTICKS ? m_extra_style ^= wxSL_AUTOTICKS : m_extra_style |= wxSL_AUTOTICKS; }, ruler_mode_menu,
             []() { return true; }, [this]() { return m_extra_style & wxSL_AUTOTICKS; }, GUI::wxGetApp().plater());
 
         append_menu_check_item(ruler_mode_menu, wxID_ANY, _L("Show estimated print time"), _L("Show estimated print time on the ruler"),
-            [this](wxCommandEvent&) { m_extra_style & wxSL_VALUE_LABEL ? m_extra_style &= wxSL_VALUE_LABEL : m_extra_style |= wxSL_VALUE_LABEL; }, ruler_mode_menu,
+            [this](wxCommandEvent&) { m_extra_style & wxSL_VALUE_LABEL ? m_extra_style ^= wxSL_VALUE_LABEL : m_extra_style |= wxSL_VALUE_LABEL; }, ruler_mode_menu,
             []() { return true; }, [this]() { return m_extra_style & wxSL_VALUE_LABEL; }, GUI::wxGetApp().plater());
 
         append_submenu(&menu, ruler_mode_menu, wxID_ANY, _L("Ruler mode"), _L("Set ruler mode"), "",
@@ -2029,7 +2028,7 @@ void Control::show_cog_icon_context_menu()
         append_menu_item(&menu, wxID_ANY, _L("Set extruder sequence for the entire print"), "",
             [this](wxCommandEvent&) { edit_extruder_sequence(); }, "", &menu);
 
-    if (m_mode != MultiExtruder && m_draw_mode == dmRegular)
+    if (GUI::wxGetApp().is_editor() && m_mode != MultiExtruder && m_draw_mode == dmRegular)
         append_menu_item(&menu, wxID_ANY, _L("Set auto color changes"), "",
             [this](wxCommandEvent&) { auto_color_change(); }, "", &menu);
 
@@ -2066,6 +2065,10 @@ void Control::auto_color_change()
                 break;
 
             if (prev_area - cur_area > delta_area) {
+                // Check percent of the area decrease. 
+                // Ignore it, if this value is less than 10% 
+                if (cur_area / prev_area > 0.9)
+                    continue;
                 int tick = get_tick_from_value(layer->print_z);
                 if (tick >= 0 && !m_ticks.has_tick(tick)) {
                     if (m_mode == SingleExtruder) {
@@ -2142,6 +2145,8 @@ static std::string get_new_color(const std::string& color)
  * */
 static void upgrade_text_entry_dialog(wxTextEntryDialog* dlg, double min = -1.0, double max = -1.0)
 {
+    GUI::wxGetApp().UpdateDlgDarkUI(dlg);
+
     // detect TextCtrl and OK button
     wxTextCtrl* textctrl {nullptr};
     wxWindowList& dlg_items = dlg->GetChildren();
@@ -2182,7 +2187,6 @@ static std::string get_custom_code(const std::string& code_in, double height)
         wxTextEntryDialogStyle | wxTE_MULTILINE);
     upgrade_text_entry_dialog(&dlg);
 
-#if ENABLE_VALIDATE_CUSTOM_GCODE
     bool valid = true;
     std::string value;
     do {
@@ -2193,12 +2197,6 @@ static std::string get_custom_code(const std::string& code_in, double height)
         valid = GUI::Tab::validate_custom_gcode("Custom G-code", value);
     } while (!valid);
     return value;
-#else
-    if (dlg.ShowModal() != wxID_OK)
-        return "";
-
-    return into_u8(dlg.GetValue());
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
 }
 
 static std::string get_pause_print_msg(const std::string& msg_in, double height)
@@ -2394,22 +2392,42 @@ void Control::edit_extruder_sequence()
 
     m_ticks.erase_all_ticks_with_code(ToolChange);
 
+    const int extr_cnt = m_extruders_sequence.extruders.size();
+    if (extr_cnt == 1)
+        return;
+
     int tick = 0;
     double value = 0.0;
-    int extruder = 0;
-    const int extr_cnt = m_extruders_sequence.extruders.size();
+    int extruder = -1;
+
+    std::random_device rd;  //Will be used to obtain a seed for the random number engine
+    std::mt19937 gen(rd()); //Standard mersenne_twister_engine seeded with rd()
+    std::uniform_int_distribution<> distrib(0, extr_cnt-1);
 
     while (tick <= m_max_value)
     {
+        bool color_repetition = false;
+        if (m_extruders_sequence.random_sequence) {
+            int rand_extr = distrib(gen);
+            if (m_extruders_sequence.color_repetition)
+                color_repetition = rand_extr == extruder;
+            else
+                while (rand_extr == extruder)
+                    rand_extr = distrib(gen);
+            extruder = rand_extr;
+        }
+        else {
+            extruder++;
+            if (extruder == extr_cnt)
+                extruder = 0;
+        }
+
         const int cur_extruder = m_extruders_sequence.extruders[extruder];
 
         bool meaningless_tick = tick == 0.0 && cur_extruder == extruder;
-        if (!meaningless_tick)
+        if (!meaningless_tick && !color_repetition)
             m_ticks.ticks.emplace(TickCode{tick, ToolChange,cur_extruder + 1, m_extruder_colors[cur_extruder]});
 
-        extruder++;
-        if (extruder == extr_cnt)
-            extruder = 0;
         if (m_extruders_sequence.is_mm_intervals) {
             value += m_extruders_sequence.interval_by_mm;
             tick = get_tick_from_value(value, true);
@@ -2466,7 +2484,8 @@ bool Control::check_ticks_changed_event(Type type)
                             _L("Your current changes will delete all saved color changes.") + "\n\n\t" +
                             _L("Are you sure you want to continue?");
 
-        wxMessageDialog msg(this, message, _L("Notice"), wxYES_NO);
+        //wxMessageDialog msg(this, message, _L("Notice"), wxYES_NO);
+        GUI::MessageDialog msg(this, message, _L("Notice"), wxYES_NO);
         if (msg.ShowModal() == wxID_YES) {
             m_ticks.erase_all_ticks_with_code(ColorChange);
             post_ticks_changed_event(ColorChange);
@@ -2486,7 +2505,8 @@ bool Control::check_ticks_changed_event(Type type)
                             _L("Your current changes will delete all saved extruder (tool) changes.") + "\n\n\t" +
                             _L("Are you sure you want to continue?")                  ) ;
 
-        wxMessageDialog msg(this, message, _L("Notice"), wxYES_NO | (m_mode == SingleExtruder ? wxCANCEL : 0));
+        //wxMessageDialog msg(this, message, _L("Notice"), wxYES_NO | (m_mode == SingleExtruder ? wxCANCEL : 0));
+        GUI::MessageDialog msg(this, message, _L("Notice"), wxYES_NO | (m_mode == SingleExtruder ? wxCANCEL : 0));
         const int answer = msg.ShowModal();
         if (answer == wxID_YES) {
             m_ticks.erase_all_ticks_with_code(ToolChange);

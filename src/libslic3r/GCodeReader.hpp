@@ -84,12 +84,8 @@ public:
     {
         const char *ptr = buffer.c_str();
         GCodeLine gline;
-#if ENABLE_VALIDATE_CUSTOM_GCODE
         m_parsing = true;
         while (m_parsing && *ptr != 0) {
-#else
-        while (*ptr != 0) {
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
             gline.reset();
             ptr = this->parse_line(ptr, gline, callback);
         }
@@ -113,11 +109,7 @@ public:
         { GCodeLine gline; this->parse_line(line.c_str(), gline, callback); }
 
     void parse_file(const std::string &file, callback_t callback);
-#if ENABLE_VALIDATE_CUSTOM_GCODE
     void quit_parsing() { m_parsing = false; }
-#else
-    void quit_parsing_file() { m_parsing_file = false; }
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
 
     float& x()       { return m_position[X]; }
     float  x() const { return m_position[X]; }
@@ -130,8 +122,9 @@ public:
     float& f()       { return m_position[F]; }
     float  f() const { return m_position[F]; }
 
+    // Returns 0 for gcfNoExtrusion.
     char   extrusion_axis() const { return m_extrusion_axis; }
-    void   set_extrusion_axis(char axis) { m_extrusion_axis = axis; }
+//  void   set_extrusion_axis(char axis) { m_extrusion_axis = axis; }
 
 private:
     const char* parse_line_internal(const char *ptr, GCodeLine &gline, std::pair<const char*, const char*> &command);
@@ -156,11 +149,7 @@ private:
     char        m_extrusion_axis;
     float       m_position[NUM_AXES];
     bool        m_verbose;
-#if ENABLE_VALIDATE_CUSTOM_GCODE
     bool        m_parsing{ false };
-#else
-    bool        m_parsing_file{ false };
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
 };
 
 } /* namespace Slic3r */

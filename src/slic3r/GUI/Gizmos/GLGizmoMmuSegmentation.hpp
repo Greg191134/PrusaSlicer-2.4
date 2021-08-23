@@ -5,20 +5,95 @@
 
 namespace Slic3r::GUI {
 
-class TriangleSelectorMmuGui : public TriangleSelectorGUI {
+class GLMmSegmentationGizmo3DScene
+{
 public:
-    explicit TriangleSelectorMmuGui(const TriangleMesh& mesh, const std::vector<std::array<uint8_t, 3>> &colors)
-        : TriangleSelectorGUI(mesh), m_colors(colors) {
-        m_iva_colors = std::vector<GLIndexedVertexArray>(colors.size());
+    GLMmSegmentationGizmo3DScene() = delete;
+
+    explicit GLMmSegmentationGizmo3DScene(size_t triangle_indices_buffers_count)
+    {
+        this->triangle_indices         = std::vector<std::vector<int>>(triangle_indices_buffers_count);
+        this->triangle_indices_sizes   = std::vector<size_t>(triangle_indices_buffers_count);
+        this->triangle_indices_VBO_ids = std::vector<unsigned int>(triangle_indices_buffers_count);
     }
+
+    virtual ~GLMmSegmentationGizmo3DScene() { release_geometry(); }
+
+    [[nodiscard]] inline bool has_VBOs(size_t triangle_indices_idx) const
+    {
+        assert(triangle_indices_idx < this->triangle_indices.size());
+        return this->triangle_indices_VBO_ids[triangle_indices_idx] != 0;
+    }
+
+    [[nodiscard]] inline bool has_contour_VBO() const { return this->contour_indices_VBO_id != 0; }
+
+    // Release the geometry data, release OpenGL VBOs.
+    void release_geometry();
+    // Finalize the initialization of the geometry, upload the geometry to OpenGL VBO objects
+    // and possibly releasing it if it has been loaded into the VBOs.
+    void finalize_vertices();
+    // Finalize the initialization of the indices, upload the indices to OpenGL VBO objects
+    // and possibly releasing it if it has been loaded into the VBOs.
+    void finalize_triangle_indices();
+    // Finalize the initialization of the contour geometry and the indices, upload both to OpenGL VBO objects
+    // and possibly releasing it if it has been loaded into the VBOs.
+    void finalize_contour();
+
+    void clear()
+    {
+        this->vertices.clear();
+        for (std::vector<int> &ti : this->triangle_indices)
+            ti.clear();
+
+        for (size_t &triangle_indices_size : this->triangle_indices_sizes)
+            triangle_indices_size = 0;
+
+        this->contour_vertices.clear();
+        this->contour_indices.clear();
+        this->contour_indices_size = 0;
+    }
+
+    void render(size_t triangle_indices_idx) const;
+
+    void render_contour() const;
+
+    std::vector<float>            vertices;
+    std::vector<std::vector<int>> triangle_indices;
+
+    std::vector<float>            contour_vertices;
+    std::vector<int>              contour_indices;
+
+    // When the triangle indices are loaded into the graphics card as Vertex Buffer Objects,
+    // the above mentioned std::vectors are cleared and the following variables keep their original length.
+    std::vector<size_t> triangle_indices_sizes;
+    size_t              contour_indices_size{0};
+
+    // IDs of the Vertex Array Objects, into which the geometry has been loaded.
+    // Zero if the VBOs are not sent to GPU yet.
+    unsigned int              vertices_VBO_id{0};
+    std::vector<unsigned int> triangle_indices_VBO_ids;
+
+    unsigned int              contour_vertices_VBO_id{0};
+    unsigned int              contour_indices_VBO_id{0};
+};
+
+class TriangleSelectorMmGui : public TriangleSelectorGUI {
+public:
+    // Plus 1 in the initialization of m_gizmo_scene is because the first position is allocated for non-painted triangles, and the indices above colors.size() are allocated for seed fill.
+    explicit TriangleSelectorMmGui(const TriangleMesh &mesh, const std::vector<std::array<float, 4>> &colors, const std::array<float, 4> &default_volume_color)
+        : TriangleSelectorGUI(mesh), m_colors(colors), m_default_volume_color(default_volume_color), m_gizmo_scene(2 * (colors.size() + 1)) {}
+    ~TriangleSelectorMmGui() override = default;
 
     // Render current selection. Transformation matrices are supposed
     // to be already set.
     void render(ImGuiWrapper* imgui) override;
 
 private:
-    const std::vector<std::array<uint8_t, 3>> &m_colors;
-    std::vector<GLIndexedVertexArray> m_iva_colors;
+    void update_render_data();
+
+    const std::vector<std::array<float, 4>> &m_colors;
+    const std::array<float, 4>               m_default_volume_color;
+    GLMmSegmentationGizmo3DScene             m_gizmo_scene;
 };
 
 class GLGizmoMmuSegmentation : public GLGizmoPainterBase
@@ -26,30 +101,39 @@ class GLGizmoMmuSegmentation : public GLGizmoPainterBase
 public:
     GLGizmoMmuSegmentation(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
         : GLGizmoPainterBase(parent, icon_filename, sprite_id) {}
+    ~GLGizmoMmuSegmentation() override = default;
 
     void render_painter_gizmo() const override;
 
     void set_painter_gizmo_data(const Selection& selection) override;
 
+    // TriangleSelector::serialization/deserialization has a limit to store 19 different states.
+    // EXTRUDER_LIMIT + 1 states are used to storing the painting because also uncolored triangles are stored.
+    // When increasing EXTRUDER_LIMIT, it needs to ensure that TriangleSelector::serialization/deserialization
+    // will be also extended to support additional states, requiring at least one state to remain free out of 19 states.
+    static const constexpr size_t EXTRUDERS_LIMIT = 16;
+
 protected:
     std::array<float, 4> get_cursor_sphere_left_button_color() const override;
     std::array<float, 4> get_cursor_sphere_right_button_color() const override;
 
-    EnforcerBlockerType get_left_button_state_type() const override { return EnforcerBlockerType(m_first_selected_extruder_idx); }
-    EnforcerBlockerType get_right_button_state_type() const override { return EnforcerBlockerType(m_second_selected_extruder_idx); }
+    EnforcerBlockerType get_left_button_state_type() const override { return EnforcerBlockerType(m_first_selected_extruder_idx + 1); }
+    EnforcerBlockerType get_right_button_state_type() const override { return EnforcerBlockerType(m_second_selected_extruder_idx + 1); }
 
     void on_render_input_window(float x, float y, float bottom_limit) override;
     std::string on_get_name() const override;
 
     bool on_is_selectable() const override;
+    bool on_is_activable() const override;
 
     wxString handle_snapshot_action_name(bool shift_down, Button button_down) const override;
 
-    size_t                              m_first_selected_extruder_idx  = 0;
-    size_t                              m_second_selected_extruder_idx = 1;
-    std::vector<std::string>            m_original_extruders_names;
-    std::vector<std::array<uint8_t, 3>> m_original_extruders_colors;
-    std::vector<std::array<uint8_t, 3>> m_modified_extruders_colors;
+    size_t                            m_first_selected_extruder_idx  = 0;
+    size_t                            m_second_selected_extruder_idx = 1;
+    std::vector<std::string>          m_original_extruders_names;
+    std::vector<std::array<float, 4>> m_original_extruders_colors;
+    std::vector<std::array<float, 4>> m_modified_extruders_colors;
+    std::vector<int>                  m_original_volumes_extruder_idxs;
 
 private:
     bool on_init() override;
@@ -57,7 +141,7 @@ private:
     void update_model_object() const override;
     void update_from_model_object() override;
 
-    void on_opening() override {}
+    void on_opening() override;
     void on_shutdown() override;
     PainterGizmoType get_painter_type() const override;
 

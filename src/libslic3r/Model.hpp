@@ -2,6 +2,7 @@
 #define slic3r_Model_hpp_
 
 #include "libslic3r.h"
+#include "enum_bitmask.hpp"
 #include "Geometry.hpp"
 #include "ObjectID.hpp"
 #include "Point.hpp"
@@ -12,6 +13,7 @@
 #include "TriangleMesh.hpp"
 #include "Arrange.hpp"
 #include "CustomGCode.hpp"
+#include "enum_bitmask.hpp"
 
 #include <map>
 #include <memory>
@@ -226,6 +228,10 @@ enum class ModelVolumeType : int {
     SUPPORT_ENFORCER,
 };
 
+enum class ModelObjectCutAttribute : int { KeepUpper, KeepLower, FlipLower }; 
+using ModelObjectCutAttributes = enum_bitmask<ModelObjectCutAttribute>;
+ENABLE_ENUM_BITMASK_OPERATORS(ModelObjectCutAttribute);
+
 // A printable object, possibly having multiple print volumes (each with its own set of parameters and materials),
 // and possibly having multiple modifier volumes, each modifier volume with its set of parameters and materials.
 // Each ModelObject may be instantiated mutliple times, each instance having different placement on the print bed,
@@ -279,6 +285,8 @@ public:
     void                    clear_volumes();
     void                    sort_volumes(bool full_sort);
     bool                    is_multiparts() const { return volumes.size() > 1; }
+    // Checks if any of object volume is painted using the multi-material painting gizmo.
+    bool                    is_mm_painted() const;
 
     ModelInstance*          add_instance();
     ModelInstance*          add_instance(const ModelInstance &instance);
@@ -316,12 +324,8 @@ public:
     Polygon       convex_hull_2d(const Transform3d &trafo_instance) const;
 
     void center_around_origin(bool include_modifiers = true);
-
-#if ENABLE_ALLOW_NEGATIVE_Z
     void ensure_on_bed(bool allow_negative_z = false);
-#else
-    void ensure_on_bed();
-#endif // ENABLE_ALLOW_NEGATIVE_Z
+
     void translate_instances(const Vec3d& vector);
     void translate_instance(size_t instance_idx, const Vec3d& vector);
     void translate(const Vec3d &vector) { this->translate(vector(0), vector(1), vector(2)); }
@@ -344,7 +348,7 @@ public:
     size_t materials_count() const;
     size_t facets_count() const;
     bool needed_repair() const;
-    ModelObjectPtrs cut(size_t instance, coordf_t z, bool keep_upper = true, bool keep_lower = true, bool rotate_lower = false);    // Note: z is in world coordinates
+    ModelObjectPtrs cut(size_t instance, coordf_t z, ModelObjectCutAttributes attributes);
     void split(ModelObjectPtrs* new_objects);
     void merge();
     // Support for non-uniform scaling of instances. If an instance is rotated by angles, which are not multiples of ninety degrees,
@@ -494,10 +498,26 @@ private:
 };
 
 enum class EnforcerBlockerType : int8_t {
-    // Maximum is 3. The value is serialized in TriangleSelector into 2 bits!
+    // Maximum is 3. The value is serialized in TriangleSelector into 2 bits.
     NONE      = 0,
     ENFORCER  = 1,
-    BLOCKER   = 2
+    BLOCKER   = 2,
+    // Maximum is 15. The value is serialized in TriangleSelector into 6 bits using a 2 bit prefix code.
+    Extruder1 = ENFORCER,
+    Extruder2 = BLOCKER,
+    Extruder3,
+    Extruder4,
+    Extruder5,
+    Extruder6,
+    Extruder7,
+    Extruder8,
+    Extruder9,
+    Extruder10,
+    Extruder11,
+    Extruder12,
+    Extruder13,
+    Extruder14,
+    Extruder15,
 };
 
 enum class ConversionType : int {
@@ -515,6 +535,8 @@ public:
     const std::pair<std::vector<std::pair<int, int>>, std::vector<bool>>& get_data() const throw() { return m_data; }
     bool set(const TriangleSelector& selector);
     indexed_triangle_set get_facets(const ModelVolume& mv, EnforcerBlockerType type) const;
+    indexed_triangle_set get_facets_strict(const ModelVolume& mv, EnforcerBlockerType type) const;
+    bool has_facets(const ModelVolume& mv, EnforcerBlockerType type) const;
     bool empty() const { return m_data.first.empty(); }
     void clear();
 
@@ -572,13 +594,14 @@ public:
         int volume_idx{ -1 };
         Vec3d mesh_offset{ Vec3d::Zero() };
         Geometry::Transformation transform;
-        bool is_converted_from_inches = false;
-        bool is_converted_from_meters = false;
+        bool is_converted_from_inches{ false };
+        bool is_converted_from_meters{ false };
+        bool is_from_builtin_objects{ false };
 
         template<class Archive> void serialize(Archive& ar) { 
             //FIXME Vojtech: Serialize / deserialize only if the Source is set.
             // likely testing input_file or object_idx would be sufficient.
-            ar(input_file, object_idx, volume_idx, mesh_offset, transform, is_converted_from_inches, is_converted_from_meters);
+            ar(input_file, object_idx, volume_idx, mesh_offset, transform, is_converted_from_inches, is_converted_from_meters, is_from_builtin_objects);
         }
     };
     Source              source;
@@ -693,6 +716,8 @@ public:
         this->seam_facets.set_new_unique_id();
         this->mmu_segmentation_facets.set_new_unique_id();
     }
+
+    bool is_mm_painted() const { return !this->mmu_segmentation_facets.empty(); }
 
 protected:
 	friend class Print;
@@ -1031,8 +1056,20 @@ public:
 
     OBJECTBASE_DERIVED_COPY_MOVE_CLONE(Model)
 
-    static Model read_from_file(const std::string& input_file, DynamicPrintConfig* config = nullptr, bool add_default_instances = true, bool check_version = false);
-    static Model read_from_archive(const std::string& input_file, DynamicPrintConfig* config, bool add_default_instances = true, bool check_version = false);
+    enum class LoadAttribute : int {
+        AddDefaultInstances,
+        CheckVersion
+    };
+    using LoadAttributes = enum_bitmask<LoadAttribute>;
+
+    static Model read_from_file(
+        const std::string& input_file, 
+        DynamicPrintConfig* config = nullptr, ConfigSubstitutionContext* config_substitutions = nullptr,
+        LoadAttributes options = LoadAttribute::AddDefaultInstances);
+    static Model read_from_archive(
+        const std::string& input_file, 
+        DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions,
+        LoadAttributes options = LoadAttribute::AddDefaultInstances);
 
     // Add a new ModelObject to this Model, generate a new ID for this ModelObject.
     ModelObject* add_object();
@@ -1097,6 +1134,8 @@ private:
     }
 };
 
+ENABLE_ENUM_BITMASK_OPERATORS(Model::LoadAttribute)
+
 #undef OBJECTBASE_DERIVED_COPY_MOVE_CLONE
 #undef OBJECTBASE_DERIVED_PRIVATE_COPY_MOVE
 
@@ -1137,9 +1176,7 @@ void check_model_ids_validity(const Model &model);
 void check_model_ids_equal(const Model &model1, const Model &model2);
 #endif /* NDEBUG */
 
-#if ENABLE_ALLOW_NEGATIVE_Z
 static const float SINKING_Z_THRESHOLD = -0.001f;
-#endif // ENABLE_ALLOW_NEGATIVE_Z
 
 } // namespace Slic3r
 

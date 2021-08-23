@@ -15,6 +15,7 @@
 #include "MeshUtils.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "GCodeViewer.hpp"
+#include "Camera.hpp"
 
 #include "libslic3r/Slicing.hpp"
 
@@ -37,9 +38,9 @@ class wxGLContext;
 
 namespace Slic3r {
 
-struct Camera;
 class BackgroundSlicingProcess;
 struct ThumbnailData;
+struct ThumbnailsParams;
 class ModelObject;
 class ModelInstance;
 class PrintObject;
@@ -92,6 +93,43 @@ private:
     wxTimer* m_timer;
 };
 
+class  ToolbarHighlighterTimerEvent : public wxEvent
+{
+public:
+    ToolbarHighlighterTimerEvent(wxEventType type, wxTimer& timer)
+        : wxEvent(timer.GetId(), type),
+        m_timer(&timer)
+    {
+        SetEventObject(timer.GetOwner());
+    }
+    int GetInterval() const { return m_timer->GetInterval(); }
+    wxTimer& GetTimer() const { return *m_timer; }
+
+    virtual wxEvent* Clone() const { return new ToolbarHighlighterTimerEvent(*this); }
+    virtual wxEventCategory GetEventCategory() const { return wxEVT_CATEGORY_TIMER; }
+private:
+    wxTimer* m_timer;
+};
+
+
+class  GizmoHighlighterTimerEvent : public wxEvent
+{
+public:
+    GizmoHighlighterTimerEvent(wxEventType type, wxTimer& timer)
+        : wxEvent(timer.GetId(), type),
+        m_timer(&timer)
+    {
+        SetEventObject(timer.GetOwner());
+    }
+    int GetInterval() const { return m_timer->GetInterval(); }
+    wxTimer& GetTimer() const { return *m_timer; }
+
+    virtual wxEvent* Clone() const { return new GizmoHighlighterTimerEvent(*this); }
+    virtual wxEventCategory GetEventCategory() const { return wxEVT_CATEGORY_TIMER; }
+private:
+    wxTimer* m_timer;
+};
+
 
 wxDECLARE_EVENT(EVT_GLCANVAS_OBJECT_SELECT, SimpleEvent);
 
@@ -120,9 +158,7 @@ wxDECLARE_EVENT(EVT_GLCANVAS_INSTANCE_SCALED, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_WIPETOWER_ROTATED, Vec3dEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_ENABLE_ACTION_BUTTONS, Event<bool>);
 wxDECLARE_EVENT(EVT_GLCANVAS_UPDATE_GEOMETRY, Vec3dsEvent<2>);
-#if ENABLE_SEQUENTIAL_LIMITS
 wxDECLARE_EVENT(EVT_GLCANVAS_MOUSE_DRAGGING_STARTED, SimpleEvent);
-#endif // ENABLE_SEQUENTIAL_LIMITS
 wxDECLARE_EVENT(EVT_GLCANVAS_MOUSE_DRAGGING_FINISHED, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_UPDATE_BED_SHAPE, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_TAB, SimpleEvent);
@@ -138,6 +174,8 @@ wxDECLARE_EVENT(EVT_GLCANVAS_ADAPTIVE_LAYER_HEIGHT_PROFILE, Event<float>);
 wxDECLARE_EVENT(EVT_GLCANVAS_SMOOTH_LAYER_HEIGHT_PROFILE, HeightProfileSmoothEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_RELOAD_FROM_DISK, SimpleEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_RENDER_TIMER, wxTimerEvent/*RenderTimerEvent*/);
+wxDECLARE_EVENT(EVT_GLCANVAS_TOOLBAR_HIGHLIGHTER_TIMER, wxTimerEvent);
+wxDECLARE_EVENT(EVT_GLCANVAS_GIZMO_HIGHLIGHTER_TIMER, wxTimerEvent);
 
 class GLCanvas3D
 {
@@ -306,25 +344,27 @@ class GLCanvas3D
         ObjectClashed
     };
 
-#if ENABLE_RENDER_STATISTICS
     class RenderStats
     {
-        std::queue<std::pair<int64_t, int64_t>> m_frames;
-        int64_t m_curr_total{ 0 };
-
+    private:
+        std::chrono::time_point<std::chrono::high_resolution_clock> m_measuring_start;
+        int m_fps_out = -1;
+        int m_fps_running = 0;
     public:
-        void add_frame(int64_t frame) {
-            int64_t now = GLCanvas3D::timestamp_now();
-            if (!m_frames.empty() && now - m_frames.front().first > 1000) {
-                m_curr_total -= m_frames.front().second;
-                m_frames.pop();
+        void increment_fps_counter() { ++m_fps_running; }
+        int get_fps() { return m_fps_out; }
+        int get_fps_and_reset_if_needed() {
+            auto cur_time = std::chrono::high_resolution_clock::now();
+            int elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(cur_time-m_measuring_start).count();
+            if (elapsed_ms > 1000  || m_fps_out == -1) {
+                m_measuring_start = cur_time;
+                m_fps_out = int (1000. * m_fps_running / elapsed_ms);
+                m_fps_running = 0;
             }
-            m_curr_total += frame;
-            m_frames.push({ now, frame });
+            return m_fps_out;
         }
-        int64_t get_average() const { return m_frames.empty() ? 0 : m_curr_total / m_frames.size(); }
+
     };
-#endif // ENABLE_RENDER_STATISTICS
 
     class Labels
     {
@@ -373,6 +413,16 @@ class GLCanvas3D
     };
 
     class RenderTimer : public wxTimer {
+    private:
+        virtual void Notify() override;
+    };
+
+    class ToolbarHighlighterTimer : public wxTimer {
+    private:
+        virtual void Notify() override;
+    };
+
+    class GizmoHighlighterTimer : public wxTimer {
     private:
         virtual void Notify() override;
     };
@@ -428,9 +478,7 @@ private:
     Model* m_model;
     BackgroundSlicingProcess *m_process;
 
-#if ENABLE_SCROLLABLE_LEGEND
     std::array<unsigned int, 2> m_old_size{ 0, 0 };
-#endif // ENABLE_SCROLLABLE_LEGEND
 
     // Screen is only refreshed from the OnIdle handler if it is dirty.
     bool m_dirty;
@@ -458,9 +506,7 @@ private:
     bool m_show_picking_texture;
 #endif // ENABLE_RENDER_PICKING_PASS
 
-#if ENABLE_RENDER_STATISTICS
     RenderStats m_render_stats;
-#endif // ENABLE_RENDER_STATISTICS
 
     int m_imgui_undo_redo_hovered_pos{ -1 };
     int m_mouse_wheel{ 0 };
@@ -499,7 +545,6 @@ private:
 
     void load_arrange_settings();
 
-#if ENABLE_SEQUENTIAL_LIMITS
     class SequentialPrintClearance
     {
         GLModel m_fill;
@@ -520,7 +565,38 @@ private:
 
     SequentialPrintClearance m_sequential_print_clearance;
     bool m_sequential_print_clearance_first_displacement{ true };
-#endif // ENABLE_SEQUENTIAL_LIMITS
+
+    struct ToolbarHighlighter
+    {
+        void set_timer_owner(wxEvtHandler* owner, int timerid = wxID_ANY);
+        void init(GLToolbarItem* toolbar_item, GLCanvas3D* canvas);
+        void blink();
+        void invalidate();
+        bool                    m_render_arrow{ false };
+        GLToolbarItem*          m_toolbar_item{ nullptr };
+    private:
+        GLCanvas3D*             m_canvas{ nullptr };
+        int				        m_blink_counter{ 0 };
+        ToolbarHighlighterTimer m_timer;       
+    }
+    m_toolbar_highlighter;
+
+    struct GizmoHighlighter
+    {
+        void set_timer_owner(wxEvtHandler* owner, int timerid = wxID_ANY);
+        void init(GLGizmosManager* manager, GLGizmosManager::EType gizmo, GLCanvas3D* canvas);
+        void blink();
+        void invalidate();
+        bool                    m_render_arrow{ false };
+        GLGizmosManager::EType  m_gizmo_type;
+    private:
+        GLGizmosManager*        m_gizmo_manager{ nullptr };
+        GLCanvas3D*             m_canvas{ nullptr };
+        int				        m_blink_counter{ 0 };
+        GizmoHighlighterTimer   m_timer;
+
+    }
+    m_gizmo_highlighter;
 
 public:
     explicit GLCanvas3D(wxGLCanvas* canvas);
@@ -547,10 +623,8 @@ public:
     const GCodeViewer::SequentialView& get_gcode_sequential_view() const { return m_gcode_viewer.get_sequential_view(); }
     void update_gcode_sequential_view_current(unsigned int first, unsigned int last) { m_gcode_viewer.update_sequential_view_current(first, last); }
 
-#if ENABLE_GCODE_WINDOW
     void start_mapping_gcode_window();
     void stop_mapping_gcode_window();
-#endif // ENABLE_GCODE_WINDOW
 
     void toggle_sla_auxiliaries_visibility(bool visible, const ModelObject* mo = nullptr, int instance_idx = -1);
     void toggle_model_objects_visibility(bool visible, const ModelObject* mo = nullptr, int instance_idx = -1);
@@ -622,12 +696,13 @@ public:
     void render();
     // printable_only == false -> render also non printable volumes as grayed
     // parts_only == false -> render also sla support and pad
-    void render_thumbnail(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, bool printable_only, bool parts_only, bool show_bed, bool transparent_background);
+    void render_thumbnail(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, const ThumbnailsParams& thumbnail_params, Camera::EType camera_type);
+    void render_thumbnail(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, const ThumbnailsParams& thumbnail_params, const GLVolumeCollection& volumes, Camera::EType camera_type);
 
     void select_all();
     void deselect_all();
     void delete_selected();
-    void ensure_on_bed(unsigned int object_idx);
+    void ensure_on_bed(unsigned int object_idx, bool allow_negative_z);
 
     bool is_gcode_legend_enabled() const { return m_gcode_viewer.is_legend_enabled(); }
     GCodeViewer::EViewType get_gcode_view_type() const { return m_gcode_viewer.get_view_type(); }
@@ -640,6 +715,10 @@ public:
     void set_toolpath_view_type(GCodeViewer::EViewType type);
     void set_volumes_z_range(const std::array<double, 2>& range);
     void set_toolpaths_z_range(const std::array<unsigned int, 2>& range);
+#if ENABLE_FIX_IMPORTING_COLOR_PRINT_VIEW_INTO_GCODEVIEWER
+    std::vector<CustomGCode::Item>& get_custom_gcode_per_print_z() { return m_gcode_viewer.get_custom_gcode_per_print_z(); }
+    size_t get_gcode_extruders_count() { return m_gcode_viewer.get_extruders_count(); }
+#endif // ENABLE_FIX_IMPORTING_COLOR_PRINT_VIEW_INTO_GCODEVIEWER
 
     std::vector<int> load_object(const ModelObject& model_object, int obj_idx, std::vector<int> instance_idxs);
     std::vector<int> load_object(const Model& model, int obj_idx);
@@ -746,6 +825,9 @@ public:
     void use_slope(bool use) { m_slope.use(use); }
     void set_slope_normal_angle(float angle_in_deg) { m_slope.set_normal_angle(angle_in_deg); }
 
+    void highlight_toolbar_item(const std::string& item_name);
+    void highlight_gizmo(const std::string& gizmo_name);
+
     ArrangeSettings get_arrange_settings() const {
         const ArrangeSettings &settings = get_arrange_settings(this);
         ArrangeSettings ret = settings;
@@ -768,7 +850,6 @@ public:
 #endif
     }
 
-#if ENABLE_SEQUENTIAL_LIMITS
     void reset_sequential_print_clearance() {
         m_sequential_print_clearance.set_visible(false);
         m_sequential_print_clearance.set_render_fill(false);
@@ -788,14 +869,13 @@ public:
     }
 
     void update_sequential_clearance();
-#endif // ENABLE_SEQUENTIAL_LIMITS
 
     const Print* fff_print() const;
     const SLAPrint* sla_print() const;
 
-#if ENABLE_SCROLLABLE_LEGEND
     void reset_old_size() { m_old_size = { 0, 0 }; }
-#endif // ENABLE_SCROLLABLE_LEGEND
+
+    bool is_object_sinking(int object_idx) const;
 
 private:
     bool _is_shown_on_screen() const;
@@ -820,12 +900,15 @@ private:
     void _rectangular_selection_picking_pass();
     void _render_background() const;
     void _render_bed(bool bottom, bool show_axes);
+    void _render_bed_for_picking(bool bottom);
+#if ENABLE_DELAYED_TRANSPARENT_VOLUMES_RENDERING
+    void _render_objects(GLVolumeCollection::ERenderType type);
+#else
     void _render_objects();
+#endif // ENABLE_DELAYED_TRANSPARENT_VOLUMES_RENDERING
     void _render_gcode() const;
     void _render_selection() const;
-#if ENABLE_SEQUENTIAL_LIMITS
     void _render_sequential_clearance();
-#endif // ENABLE_SEQUENTIAL_LIMITS
 #if ENABLE_RENDER_SELECTION_CENTER
     void _render_selection_center() const;
 #endif // ENABLE_RENDER_SELECTION_CENTER
@@ -846,13 +929,13 @@ private:
     bool _render_undo_redo_stack(const bool is_undo, float pos_x);
     bool _render_search_list(float pos_x);
     bool _render_arrange_menu(float pos_x);
-    void _render_thumbnail_internal(ThumbnailData& thumbnail_data, bool printable_only, bool parts_only, bool show_bed, bool transparent_background);
+    void _render_thumbnail_internal(ThumbnailData& thumbnail_data, const ThumbnailsParams& thumbnail_params, const GLVolumeCollection& volumes, Camera::EType camera_type);
     // render thumbnail using an off-screen framebuffer
-    void _render_thumbnail_framebuffer(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, bool printable_only, bool parts_only, bool show_bed, bool transparent_background);
+    void _render_thumbnail_framebuffer(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, const ThumbnailsParams& thumbnail_params, const GLVolumeCollection& volumes, Camera::EType camera_type);
     // render thumbnail using an off-screen framebuffer when GLEW_EXT_framebuffer_object is supported
-    void _render_thumbnail_framebuffer_ext(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, bool printable_only, bool parts_only, bool show_bed, bool transparent_background);
+    void _render_thumbnail_framebuffer_ext(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, const ThumbnailsParams& thumbnail_params, const GLVolumeCollection& volumes, Camera::EType camera_type);
     // render thumbnail using the default framebuffer
-    void _render_thumbnail_legacy(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, bool printable_only, bool parts_only, bool show_bed, bool transparent_background);
+    void _render_thumbnail_legacy(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, const ThumbnailsParams& thumbnail_params, const GLVolumeCollection& volumes, Camera::EType camera_type);
 
     void _update_volumes_hover_state();
 
@@ -901,7 +984,7 @@ private:
 
     float get_overlay_window_width() { return LayersEditing::get_overlay_window_width(); }
 
-    static std::vector<float> _parse_colors(const std::vector<std::string>& colors);
+    static std::vector<std::array<float, 4>> _parse_colors(const std::vector<std::string>& colors);
 };
 
 } // namespace GUI

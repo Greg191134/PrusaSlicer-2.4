@@ -125,7 +125,7 @@ void GLGizmoRotate::on_update(const UpdateData& data)
     m_angle = theta;
 }
 
-void GLGizmoRotate::on_render() const
+void GLGizmoRotate::on_render()
 {
     if (!m_grabbers[0].enabled)
         return;
@@ -169,7 +169,7 @@ void GLGizmoRotate::on_render() const
     glsafe(::glPopMatrix());
 }
 
-void GLGizmoRotate::on_render_for_picking() const
+void GLGizmoRotate::on_render_for_picking()
 {
     const Selection& selection = m_parent.get_selection();
 
@@ -336,16 +336,11 @@ void GLGizmoRotate::render_grabber_extension(const BoundingBoxf3& box, bool pick
     if (shader == nullptr)
         return;
 
-    if (! picking) {
+    const_cast<GLModel*>(&m_cone)->set_color(-1, color);
+    if (!picking) {
         shader->start_using();
         shader->set_uniform("emission_factor", 0.1);
-#if ENABLE_SEQUENTIAL_LIMITS
-        const_cast<GLModel*>(&m_cone)->set_color(-1, color);
-#else
-        shader->set_uniform("uniform_color", color);
-#endif // ENABLE_SEQUENTIAL_LIMITS
-    } else
-        glsafe(::glColor4fv(color.data()));
+    }
 
     glsafe(::glPushMatrix());
     glsafe(::glTranslated(m_grabbers[0].center.x(), m_grabbers[0].center.y(), m_grabbers[0].center.z()));
@@ -488,22 +483,19 @@ void GLGizmoRotate3D::on_stop_dragging()
         m_gizmos[m_hover_id].stop_dragging();
 }
 
-void GLGizmoRotate3D::on_render() const
+void GLGizmoRotate3D::on_render()
 {
     glsafe(::glClear(GL_DEPTH_BUFFER_BIT));
 
-    if ((m_hover_id == -1) || (m_hover_id == 0))
+    if (m_hover_id == -1 || m_hover_id == 0)
         m_gizmos[X].render();
 
-    if ((m_hover_id == -1) || (m_hover_id == 1))
+    if (m_hover_id == -1 || m_hover_id == 1)
         m_gizmos[Y].render();
 
-    if ((m_hover_id == -1) || (m_hover_id == 2))
+    if (m_hover_id == -1 || m_hover_id == 2)
         m_gizmos[Z].render();
 }
-
-const char * GLGizmoRotate3D::RotoptimzeWindow::options[RotoptimizeJob::get_methods_count()];
-bool GLGizmoRotate3D::RotoptimzeWindow::options_valid = false;
 
 GLGizmoRotate3D::RotoptimzeWindow::RotoptimzeWindow(ImGuiWrapper *   imgui,
                                                     State &          state,
@@ -520,21 +512,26 @@ GLGizmoRotate3D::RotoptimzeWindow::RotoptimzeWindow(ImGuiWrapper *   imgui,
     y = std::min(y, alignment.bottom_limit - win_h);
     ImGui::SetWindowPos(ImVec2(x, y), ImGuiCond_Always);
 
-    ImGui::PushItemWidth(200.f);
+    ImGui::PushItemWidth(300.f);
 
-    size_t methods_cnt = RotoptimizeJob::get_methods_count();
-    if (!options_valid) {
-        for (size_t i = 0; i < methods_cnt; ++i)
-            options[i] = RotoptimizeJob::get_method_names()[i].c_str();
+    if (ImGui::BeginCombo(_L("Choose goal").c_str(), RotoptimizeJob::get_method_name(state.method_id).c_str())) {
+        for (size_t i = 0; i < RotoptimizeJob::get_methods_count(); ++i) {
+            if (ImGui::Selectable(RotoptimizeJob::get_method_name(i).c_str())) {
+                state.method_id = i;
+                wxGetApp().app_config->set("sla_auto_rotate",
+                                           "method_id",
+                                           std::to_string(state.method_id));
+            }
 
-        options_valid = true;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", RotoptimizeJob::get_method_description(i).c_str());
+        }
+
+        ImGui::EndCombo();
     }
 
-    int citem = state.method_id;
-    if (ImGui::Combo(_L("Choose goal").c_str(), &citem, options, methods_cnt) ) {
-        state.method_id = citem;
-        wxGetApp().app_config->set("sla_auto_rotate", "method_id", std::to_string(state.method_id));
-    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", RotoptimizeJob::get_method_description(state.method_id).c_str());
 
     ImGui::Separator();
 

@@ -13,8 +13,6 @@
 #include <algorithm>
 #include <assert.h>
 
-#if ENABLE_PROJECT_DIRTY_STATE
-
 namespace Slic3r {
 namespace GUI {
 
@@ -222,7 +220,7 @@ void ProjectDirtyStateManager::reset_after_save()
                 m_last_save.main = main_active_snapshot->timestamp + 1;
         }
         const UndoRedo::Snapshot* saveable_snapshot = get_last_saveable_snapshot(EStackType::Gizmo, active_stack, m_state.gizmos, m_last_save.main);
-        m_last_save.gizmo = saveable_snapshot->timestamp;
+        m_last_save.gizmo = (saveable_snapshot != nullptr) ? saveable_snapshot->timestamp : 0;
     }
 
     reset_initial_presets();
@@ -410,6 +408,4 @@ void ProjectDirtyStateManager::update_from_undo_redo_gizmo_stack(UpdateType type
 
 } // namespace GUI
 } // namespace Slic3r
-
-#endif // ENABLE_PROJECT_DIRTY_STATE
 

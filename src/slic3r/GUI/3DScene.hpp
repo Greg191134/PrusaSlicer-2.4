@@ -8,6 +8,10 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Geometry.hpp"
 
+#if ENABLE_SINKING_CONTOURS
+#include "GLModel.hpp"
+#endif // ENABLE_SINKING_CONTOURS
+
 #include <functional>
 
 #define HAS_GLSAFE
@@ -39,26 +43,22 @@ enum ModelInstanceEPrintVolumeState : unsigned char;
 // possibly indexed by triangles and / or quads.
 class GLIndexedVertexArray {
 public:
-    GLIndexedVertexArray() : 
-        vertices_and_normals_interleaved_VBO_id(0),
-        triangle_indices_VBO_id(0),
-        quad_indices_VBO_id(0)
-        {}
+    // Only Eigen types of Nx16 size are vectorized. This bounding box will not be vectorized.
+    static_assert(sizeof(Eigen::AlignedBox<float, 3>) == 24, "Eigen::AlignedBox<float, 3> is not being vectorized, thus it does not need to be aligned");
+    using BoundingBox = Eigen::AlignedBox<float, 3>;
+
+    GLIndexedVertexArray() { m_bounding_box.setEmpty(); }
     GLIndexedVertexArray(const GLIndexedVertexArray &rhs) :
         vertices_and_normals_interleaved(rhs.vertices_and_normals_interleaved),
         triangle_indices(rhs.triangle_indices),
         quad_indices(rhs.quad_indices),
-        vertices_and_normals_interleaved_VBO_id(0),
-        triangle_indices_VBO_id(0),
-        quad_indices_VBO_id(0)
-        { assert(! rhs.has_VBOs()); }
+        m_bounding_box(rhs.m_bounding_box)
+        { assert(! rhs.has_VBOs()); m_bounding_box.setEmpty(); }
     GLIndexedVertexArray(GLIndexedVertexArray &&rhs) :
         vertices_and_normals_interleaved(std::move(rhs.vertices_and_normals_interleaved)),
         triangle_indices(std::move(rhs.triangle_indices)),
         quad_indices(std::move(rhs.quad_indices)),
-        vertices_and_normals_interleaved_VBO_id(0),
-        triangle_indices_VBO_id(0),
-        quad_indices_VBO_id(0)
+        m_bounding_box(rhs.m_bounding_box)
         { assert(! rhs.has_VBOs()); }
 
     ~GLIndexedVertexArray() { release_geometry(); }
@@ -92,7 +92,7 @@ public:
         this->vertices_and_normals_interleaved 		 = std::move(rhs.vertices_and_normals_interleaved);
         this->triangle_indices                 		 = std::move(rhs.triangle_indices);
         this->quad_indices                     		 = std::move(rhs.quad_indices);
-        this->m_bounding_box                   		 = std::move(rhs.m_bounding_box);
+        this->m_bounding_box                   		 = rhs.m_bounding_box;
         this->vertices_and_normals_interleaved_size  = rhs.vertices_and_normals_interleaved_size;
         this->triangle_indices_size                  = rhs.triangle_indices_size;
         this->quad_indices_size                      = rhs.quad_indices_size;
@@ -147,7 +147,7 @@ public:
         this->vertices_and_normals_interleaved.emplace_back(z);
 
         this->vertices_and_normals_interleaved_size = this->vertices_and_normals_interleaved.size();
-        m_bounding_box.merge(Vec3f(x, y, z).cast<double>());
+        m_bounding_box.extend(Vec3f(x, y, z));
     };
 
     inline void push_geometry(double x, double y, double z, double nx, double ny, double nz) {
@@ -203,10 +203,10 @@ public:
         this->vertices_and_normals_interleaved.clear();
         this->triangle_indices.clear();
         this->quad_indices.clear();
-        this->m_bounding_box.reset();
         vertices_and_normals_interleaved_size = 0;
         triangle_indices_size = 0;
         quad_indices_size = 0;
+        m_bounding_box.setEmpty();
     }
 
     // Shrink the internal storage to tighly fit the data stored.
@@ -216,7 +216,7 @@ public:
         this->quad_indices.shrink_to_fit();
     }
 
-    const BoundingBoxf3& bounding_box() const { return m_bounding_box; }
+    const BoundingBox& bounding_box() const { return m_bounding_box; }
 
     // Return an estimate of the memory consumed by this class.
     size_t cpu_memory_used() const { return sizeof(*this) + vertices_and_normals_interleaved.capacity() * sizeof(float) + triangle_indices.capacity() * sizeof(int) + quad_indices.capacity() * sizeof(int); }
@@ -235,38 +235,41 @@ public:
     size_t total_memory_used() const { return this->cpu_memory_used() + this->gpu_memory_used(); }
 
 private:
-    BoundingBoxf3 m_bounding_box;
+    BoundingBox m_bounding_box;
 };
 
 class GLVolume {
 public:
-    static const float SELECTED_COLOR[4];
-    static const float HOVER_SELECT_COLOR[4];
-    static const float HOVER_DESELECT_COLOR[4];
-    static const float OUTSIDE_COLOR[4];
-    static const float SELECTED_OUTSIDE_COLOR[4];
-    static const float DISABLED_COLOR[4];
-    static const float MODEL_COLOR[4][4];
-    static const float SLA_SUPPORT_COLOR[4];
-    static const float SLA_PAD_COLOR[4];
-    static const float NEUTRAL_COLOR[4];
+    static const std::array<float, 4> SELECTED_COLOR;
+    static const std::array<float, 4> HOVER_SELECT_COLOR;
+    static const std::array<float, 4> HOVER_DESELECT_COLOR;
+    static const std::array<float, 4> OUTSIDE_COLOR;
+    static const std::array<float, 4> SELECTED_OUTSIDE_COLOR;
+    static const std::array<float, 4> DISABLED_COLOR;
+    static const std::array<float, 4> SLA_SUPPORT_COLOR;
+    static const std::array<float, 4> SLA_PAD_COLOR;
+    static const std::array<float, 4> NEUTRAL_COLOR;
+    static const std::array<std::array<float, 4>, 4> MODEL_COLOR;
 
     enum EHoverState : unsigned char
     {
         HS_None,
+#if ENABLE_SINKING_CONTOURS
+        HS_Hover,
+#endif // ENABLE_SINKING_CONTOURS
         HS_Select,
         HS_Deselect
     };
 
     GLVolume(float r = 1.f, float g = 1.f, float b = 1.f, float a = 1.f);
-    GLVolume(const float *rgba) : GLVolume(rgba[0], rgba[1], rgba[2], rgba[3]) {}
+    GLVolume(const std::array<float, 4>& rgba) : GLVolume(rgba[0], rgba[1], rgba[2], rgba[3]) {}
 
 private:
     Geometry::Transformation m_instance_transformation;
     Geometry::Transformation m_volume_transformation;
 
     // Shift in z required by sla supports+pad
-    double        		  m_sla_shift_z;
+    double        m_sla_shift_z;
     // Bounding box of this volume, in unscaled coordinates.
     BoundingBoxf3 m_transformed_bounding_box;
     // Whether or not is needed to recalculate the transformed bounding box.
@@ -278,11 +281,32 @@ private:
     // Whether or not is needed to recalculate the transformed convex hull bounding box.
     bool          m_transformed_convex_hull_bounding_box_dirty;
 
+#if ENABLE_SINKING_CONTOURS
+    class SinkingContours
+    {
+        static const float HalfWidth;
+        GLVolume& m_parent;
+        GUI::GLModel m_model;
+        BoundingBoxf3 m_old_box;
+        Vec3d m_shift{ Vec3d::Zero() };
+
+    public:
+        SinkingContours(GLVolume& volume) : m_parent(volume) {}
+        void render();
+
+    private:
+        void update();
+    };
+
+    SinkingContours m_sinking_contours;
+#endif // ENABLE_SINKING_CONTOURS
+
 public:
     // Color of the triangles / quads held by this volume.
-    float               color[4];
+    std::array<float, 4> color;
     // Color used to render this volume.
-    float               render_color[4];
+    std::array<float, 4> render_color;
+
     struct CompositeID {
         CompositeID(int object_id, int volume_id, int instance_id) : object_id(object_id), volume_id(volume_id), instance_id(instance_id) {}
         CompositeID() : object_id(-1), volume_id(-1), instance_id(-1) {}
@@ -337,7 +361,11 @@ public:
 	    bool                force_native_color : 1;
         // Whether or not render this volume in neutral
         bool                force_neutral_color : 1;
-	};
+#if ENABLE_SINKING_CONTOURS
+        // Whether or not to force rendering of sinking contours
+        bool                force_sinking_contours : 1;
+#endif // ENABLE_SINKING_CONTOURS
+    };
 
     // Is mouse or rectangle selection over this object to select/deselect it ?
     EHoverState         	hover;
@@ -355,14 +383,22 @@ public:
     std::vector<size_t>         offsets;
 
     // Bounding box of this volume, in unscaled coordinates.
-    const BoundingBoxf3& bounding_box() const { return this->indexed_vertex_array.bounding_box(); }
+    BoundingBoxf3 bounding_box() const { 
+        BoundingBoxf3 out;
+        if (! this->indexed_vertex_array.bounding_box().isEmpty()) {
+            out.min = this->indexed_vertex_array.bounding_box().min().cast<double>();
+            out.max = this->indexed_vertex_array.bounding_box().max().cast<double>();
+            out.defined = true;
+        };
+        return out;
+    }
 
     void set_render_color(float r, float g, float b, float a);
-    void set_render_color(const float* rgba, unsigned int size);
+    void set_render_color(const std::array<float, 4>& rgba);
     // Sets render color in dependence of current state
     void set_render_color();
     // set color according to model volume
-    void set_color_from_model_volume(const ModelVolume *model_volume);
+    void set_color_from_model_volume(const ModelVolume& model_volume);
 
     const Geometry::Transformation& get_instance_transformation() const { return m_instance_transformation; }
     void set_instance_transformation(const Geometry::Transformation& transformation) { m_instance_transformation = transformation; set_bounding_boxes_as_dirty(); }
@@ -454,10 +490,11 @@ public:
     bool                is_sla_support() const;
     bool                is_sla_pad() const;
 
-#if ENABLE_ALLOW_NEGATIVE_Z
     bool                is_sinking() const;
     bool                is_below_printbed() const;
-#endif // ENABLE_ALLOW_NEGATIVE_Z
+#if ENABLE_SINKING_CONTOURS
+    void                render_sinking_contours();
+#endif // ENABLE_SINKING_CONTOURS
 
     // Return an estimate of the memory consumed by this class.
     size_t 				cpu_memory_used() const { 
@@ -476,7 +513,7 @@ typedef std::vector<GLVolumeWithIdAndZ> GLVolumeWithIdAndZList;
 class GLVolumeCollection
 {
 public:
-    enum ERenderType : unsigned char
+    enum class ERenderType : unsigned char
     {
         Opaque,
         Transparent,
@@ -502,6 +539,7 @@ private:
     };
 
     Slope m_slope;
+    bool m_show_sinking_contours = false;
 
 public:
     GLVolumePtrs volumes;
@@ -538,8 +576,8 @@ public:
     int load_wipe_tower_preview(
         int obj_idx, float pos_x, float pos_y, float width, float depth, float height, float rotation_angle, bool size_unknown, float brim_width, bool opengl_initialized);
 
-    GLVolume* new_toolpath_volume(const float *rgba, size_t reserve_vbo_floats = 0);
-    GLVolume* new_nontoolpath_volume(const float *rgba, size_t reserve_vbo_floats = 0);
+    GLVolume* new_toolpath_volume(const std::array<float, 4>& rgba, size_t reserve_vbo_floats = 0);
+    GLVolume* new_nontoolpath_volume(const std::array<float, 4>& rgba, size_t reserve_vbo_floats = 0);
 
     // Render the volumes by OpenGL.
     void render(ERenderType type, bool disable_cullface, const Transform3d& view_matrix, std::function<bool(const GLVolume&)> filter_func = std::function<bool(const GLVolume&)>()) const;
@@ -571,6 +609,7 @@ public:
     float get_slope_normal_z() const { return m_slope.normal_z; }
     void set_slope_normal_z(float normal_z) { m_slope.normal_z = normal_z; }
     void set_default_slope_normal_z() { m_slope.normal_z = -::cos(Geometry::deg2rad(90.0f - 45.0f)); }
+    void set_show_sinking_contours(bool show) { m_show_sinking_contours = show; }
 
     // returns true if all the volumes are completely contained in the print volume
     // returns the containment state in the given out_state, if non-null

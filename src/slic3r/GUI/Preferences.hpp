@@ -7,7 +7,6 @@
 #include <wx/dialog.h>
 #include <map>
 
-class wxRadioBox;
 class wxColourPickerCtrl;
 
 namespace Slic3r {
@@ -25,28 +24,22 @@ class PreferencesDialog : public DPIDialog
 	std::shared_ptr<ConfigOptionsGroup>	m_optgroup_render;
 #endif // ENABLE_ENVIRONMENT_MAP
 	wxSizer*                            m_icon_size_sizer;
-	wxRadioBox*							m_layout_mode_box;
 	wxColourPickerCtrl*					m_sys_colour {nullptr};
 	wxColourPickerCtrl*					m_mod_colour {nullptr};
     bool                                isOSX {false};
 	bool								m_settings_layout_changed {false};
 	bool								m_seq_top_layer_only_changed{ false };
-#if ENABLE_GCODE_LINES_ID_IN_H_SLIDER
-	bool								m_seq_top_gcode_indices_changed{ false };
-#endif // ENABLE_GCODE_LINES_ID_IN_H_SLIDER
+	bool								m_recreate_GUI{false};
 
 public:
-	explicit PreferencesDialog(wxWindow* parent);
+	explicit PreferencesDialog(wxWindow* parent, int selected_tab = 0);
 	~PreferencesDialog() = default;
 
 	bool settings_layout_changed() const { return m_settings_layout_changed; }
 	bool seq_top_layer_only_changed() const { return m_seq_top_layer_only_changed; }
-#if ENABLE_GCODE_LINES_ID_IN_H_SLIDER
-	bool seq_seq_top_gcode_indices_changed() const { return m_seq_top_gcode_indices_changed; }
-#endif // ENABLE_GCODE_LINES_ID_IN_H_SLIDER
-
-	void	build();
-	void	accept();
+	bool recreate_GUI() const { return m_recreate_GUI; }
+	void	build(size_t selected_tab = 0);
+	void	accept(wxEvent&);
 
 protected:
     void on_dpi_changed(const wxRect &suggested_rect) override;

@@ -419,7 +419,7 @@ namespace Slic3r {
         _3MF_Importer();
         ~_3MF_Importer();
 
-        bool load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, bool check_version);
+        bool load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, bool check_version);
 
     private:
         void _destroy_xml_parser();
@@ -434,16 +434,16 @@ namespace Slic3r {
                 XML_ErrorString(XML_GetErrorCode(m_xml_parser));
         }
 
-        bool _load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config);
+        bool _load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions);
         bool _extract_model_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_layer_heights_profile_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
-        void _extract_layer_config_ranges_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
+        void _extract_layer_config_ranges_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, ConfigSubstitutionContext& config_substitutions);
         void _extract_sla_support_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_sla_drain_holes_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
 
         void _extract_custom_gcode_per_print_z_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
 
-        void _extract_print_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, const std::string& archive_filename);
+        void _extract_print_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& subs_context, const std::string& archive_filename);
         bool _extract_model_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, Model& model);
 
         // handlers to parse the .model file
@@ -510,7 +510,7 @@ namespace Slic3r {
         bool _handle_start_config_metadata(const char** attributes, unsigned int num_attributes);
         bool _handle_end_config_metadata();
 
-        bool _generate_volumes(ModelObject& object, const Geometry& geometry, const ObjectMetadata::VolumeMetadataList& volumes);
+        bool _generate_volumes(ModelObject& object, const Geometry& geometry, const ObjectMetadata::VolumeMetadataList& volumes, ConfigSubstitutionContext& config_substitutions);
 
         // callbacks to parse the .model file
         static void XMLCALL _handle_start_model_xml_element(void* userData, const char* name, const char** attributes);
@@ -539,7 +539,7 @@ namespace Slic3r {
         _destroy_xml_parser();
     }
 
-    bool _3MF_Importer::load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, bool check_version)
+    bool _3MF_Importer::load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, bool check_version)
     {
         m_version = 0;
         m_check_version = check_version;
@@ -560,7 +560,7 @@ namespace Slic3r {
         m_curr_characters.clear();
         clear_errors();
 
-        return _load_model_from_file(filename, model, config);
+        return _load_model_from_file(filename, model, config, config_substitutions);
     }
 
     void _3MF_Importer::_destroy_xml_parser()
@@ -581,7 +581,7 @@ namespace Slic3r {
         XML_StopParser(m_xml_parser, false);
     }
 
-    bool _3MF_Importer::_load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config)
+    bool _3MF_Importer::_load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions)
     {
         mz_zip_archive archive;
         mz_zip_zero_struct(&archive);
@@ -595,7 +595,7 @@ namespace Slic3r {
 
         mz_zip_archive_file_stat stat;
 
-        m_name = boost::filesystem::path(filename).filename().stem().string();
+        m_name = boost::filesystem::path(filename).stem().string();
 
         // we first loop the entries to read from the archive the .model file only, in order to extract the version from it
         for (mz_uint i = 0; i < num_entries; ++i) {
@@ -635,7 +635,7 @@ namespace Slic3r {
                 }
                 else if (boost::algorithm::iequals(name, LAYER_CONFIG_RANGES_FILE)) {
                     // extract slic3r layer config ranges file
-                    _extract_layer_config_ranges_from_archive(archive, stat);
+                    _extract_layer_config_ranges_from_archive(archive, stat, config_substitutions);
                 }
                 else if (boost::algorithm::iequals(name, SLA_SUPPORT_POINTS_FILE)) {
                     // extract sla support points file
@@ -647,7 +647,7 @@ namespace Slic3r {
                 }
                 else if (boost::algorithm::iequals(name, PRINT_CONFIG_FILE)) {
                     // extract slic3r print config file
-                    _extract_print_config_from_archive(archive, stat, config, filename);
+                    _extract_print_config_from_archive(archive, stat, config, config_substitutions, filename);
                 }
                 else if (boost::algorithm::iequals(name, CUSTOM_GCODE_PER_PRINT_Z_FILE)) {
                     // extract slic3r layer config ranges file
@@ -666,7 +666,6 @@ namespace Slic3r {
 
         close_zip_reader(&archive);
 
-#if ENABLE_RELOAD_FROM_DISK_FOR_3MF
         if (m_version == 0) {
             // if the 3mf was not produced by PrusaSlicer and there is more than one instance,
             // split the object in as many objects as instances
@@ -704,14 +703,13 @@ namespace Slic3r {
                         new_model_object->clear_instances();
                         new_model_object->add_instance(*model_object->instances.back());
                         model_object->delete_last_instance();
-                        if (!_generate_volumes(*new_model_object, *geometry, volumes))
+                        if (!_generate_volumes(*new_model_object, *geometry, volumes, config_substitutions))
                             return false;
                     }
                 }
                 ++i;
             }
         }
-#endif // ENABLE_RELOAD_FROM_DISK_FOR_3MF
 
         for (const IdToModelObjectMap::value_type& object : m_objects) {
             if (object.second >= int(m_model->objects.size())) {
@@ -759,7 +757,7 @@ namespace Slic3r {
                     if (metadata.key == "name")
                         model_object->name = metadata.value;
                     else
-                        model_object->config.set_deserialize(metadata.key, metadata.value);
+                        model_object->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
                 }
 
                 // select object's detected volumes
@@ -775,11 +773,10 @@ namespace Slic3r {
                 volumes_ptr = &volumes;
             }
 
-            if (!_generate_volumes(*model_object, obj_geometry->second, *volumes_ptr))
+            if (!_generate_volumes(*model_object, obj_geometry->second, *volumes_ptr, config_substitutions))
                 return false;
         }
 
-#if ENABLE_RELOAD_FROM_DISK_FOR_3MF
         int object_idx = 0;
         for (ModelObject* o : model.objects) {
             int volume_idx = 0;
@@ -795,7 +792,6 @@ namespace Slic3r {
             }
             ++object_idx;
         }
-#endif // ENABLE_RELOAD_FROM_DISK_FOR_3MF
 
 //        // fixes the min z of the model if negative
 //        model.adjust_min_z();
@@ -867,7 +863,10 @@ namespace Slic3r {
         return true;
     }
 
-    void _3MF_Importer::_extract_print_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, const std::string& archive_filename)
+    void _3MF_Importer::_extract_print_config_from_archive(
+        mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, 
+        DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, 
+        const std::string& archive_filename)
     {
         if (stat.m_uncomp_size > 0) {
             std::string buffer((size_t)stat.m_uncomp_size, 0);
@@ -876,7 +875,9 @@ namespace Slic3r {
                 add_error("Error while reading config data to buffer");
                 return;
             }
-            config.load_from_gcode_string(buffer.data());
+            //FIXME Loading a "will be one day a legacy format" of configuration in a form of a G-code comment.
+            // Each config line is prefixed with a semicolon (G-code comment), that is ugly.
+            config_substitutions.substitutions = config.load_from_ini_string_commented(std::move(buffer), config_substitutions.rule);
         }
     }
 
@@ -942,7 +943,7 @@ namespace Slic3r {
         }
     }
 
-    void _3MF_Importer::_extract_layer_config_ranges_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat)
+    void _3MF_Importer::_extract_layer_config_ranges_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, ConfigSubstitutionContext& config_substitutions)
     {
         if (stat.m_uncomp_size > 0) {
             std::string buffer((size_t)stat.m_uncomp_size, 0);
@@ -987,8 +988,7 @@ namespace Slic3r {
                             continue;
                         std::string opt_key = option.second.get<std::string>("<xmlattr>.opt_key");
                         std::string value = option.second.data();
-
-                        config.set_deserialize(opt_key, value);
+                        config.set_deserialize(opt_key, value, config_substitutions);
                     }
 
                     config_ranges[{ min_z, max_z }].assign_config(std::move(config));
@@ -1408,6 +1408,13 @@ namespace Slic3r {
                 m_model->delete_object(model_object);
         }
 
+        if (m_version == 0) {
+            // if the 3mf was not produced by PrusaSlicer and there is only one object,
+            // set the object name to match the filename
+            if (m_model->objects.size() == 1)
+                m_model->objects.front()->name = m_name;
+        }
+
         // applies instances' matrices
         for (Instance& instance : m_instances) {
             if (instance.instance != nullptr && instance.instance->get_object() != nullptr)
@@ -1568,12 +1575,7 @@ namespace Slic3r {
 
         m_curr_object.geometry.custom_supports.push_back(get_attribute_value_string(attributes, num_attributes, CUSTOM_SUPPORTS_ATTR));
         m_curr_object.geometry.custom_seam.push_back(get_attribute_value_string(attributes, num_attributes, CUSTOM_SEAM_ATTR));
-//        m_curr_object.geometry.mmu_segmentation.push_back(get_attribute_value_string(attributes, num_attributes, MMU_SEGMENTATION_ATTR));
-        // FIXME Lukas H.: This is only for backward compatibility with older 3MF test files. Removes this when it is not necessary.
-        if(get_attribute_value_string(attributes, num_attributes, MMU_SEGMENTATION_ATTR) != "")
-            m_curr_object.geometry.mmu_segmentation.push_back(get_attribute_value_string(attributes, num_attributes, MMU_SEGMENTATION_ATTR));
-        else
-            m_curr_object.geometry.mmu_segmentation.push_back(get_attribute_value_string(attributes, num_attributes, "slic3rpe:mmu_painting"));
+        m_curr_object.geometry.mmu_segmentation.push_back(get_attribute_value_string(attributes, num_attributes, MMU_SEGMENTATION_ATTR));
         return true;
     }
 
@@ -1827,7 +1829,7 @@ namespace Slic3r {
         return true;
     }
 
-    bool _3MF_Importer::_generate_volumes(ModelObject& object, const Geometry& geometry, const ObjectMetadata::VolumeMetadataList& volumes)
+    bool _3MF_Importer::_generate_volumes(ModelObject& object, const Geometry& geometry, const ObjectMetadata::VolumeMetadataList& volumes, ConfigSubstitutionContext& config_substitutions)
     {
         if (!object.volumes.empty()) {
             add_error("Found invalid volumes count");
@@ -1880,7 +1882,6 @@ namespace Slic3r {
 			stl_get_size(&stl);
 			triangle_mesh.repair();
 
-#if ENABLE_RELOAD_FROM_DISK_FOR_3MF
             if (m_version == 0) {
                 // if the 3mf was not produced by PrusaSlicer and there is only one instance,
                 // bake the transformation into the geometry to allow the reload from disk command
@@ -1890,7 +1891,6 @@ namespace Slic3r {
                     object.instances.front()->set_transformation(Slic3r::Geometry::Transformation());
                 }
             }
-#endif // ENABLE_RELOAD_FROM_DISK_FOR_3MF
 
 			ModelVolume* volume = object.add_volume(std::move(triangle_mesh));
             // stores the volume matrix taken from the metadata, if present
@@ -1943,7 +1943,7 @@ namespace Slic3r {
                 else if (metadata.key == SOURCE_IN_METERS)
                     volume->source.is_converted_from_meters = metadata.value == "1";
                 else
-                    volume->config.set_deserialize(metadata.key, metadata.value);
+                    volume->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
             }
         }
 
@@ -2869,9 +2869,10 @@ namespace Slic3r {
                                     stream << prefix << SOURCE_OFFSET_Y_KEY  << "\" " << VALUE_ATTR << "=\"" << volume->source.mesh_offset(1) << "\"/>\n";
                                     stream << prefix << SOURCE_OFFSET_Z_KEY  << "\" " << VALUE_ATTR << "=\"" << volume->source.mesh_offset(2) << "\"/>\n";
                                 }
+                                assert(! volume->source.is_converted_from_inches || ! volume->source.is_converted_from_meters);
                                 if (volume->source.is_converted_from_inches)
                                     stream << prefix << SOURCE_IN_INCHES << "\" " << VALUE_ATTR << "=\"1\"/>\n";
-                                if (volume->source.is_converted_from_meters)
+                                else if (volume->source.is_converted_from_meters)
                                     stream << prefix << SOURCE_IN_METERS << "\" " << VALUE_ATTR << "=\"1\"/>\n";
                             }
 
@@ -2953,16 +2954,15 @@ bool _3MF_Exporter::_add_custom_gcode_per_print_z_file_to_archive( mz_zip_archiv
     return true;
 }
 
-bool load_3mf(const char* path, DynamicPrintConfig* config, Model* model, bool check_version)
+bool load_3mf(const char* path, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, Model* model, bool check_version)
 {
-    if (path == nullptr || config == nullptr || model == nullptr)
+    if (path == nullptr || model == nullptr)
         return false;
 
     // All import should use "C" locales for number formatting.
     CNumericLocalesSetter locales_setter;
-
-    _3MF_Importer importer;
-    bool res = importer.load_model_from_file(path, *model, *config, check_version);
+    _3MF_Importer         importer;
+    bool res = importer.load_model_from_file(path, *model, config, config_substitutions, check_version);
     importer.log_errors();
     return res;
 }

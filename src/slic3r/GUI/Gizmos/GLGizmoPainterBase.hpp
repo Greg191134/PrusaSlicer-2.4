@@ -31,10 +31,14 @@ class TriangleSelectorGUI : public TriangleSelector {
 public:
     explicit TriangleSelectorGUI(const TriangleMesh& mesh)
         : TriangleSelector(mesh) {}
+    virtual ~TriangleSelectorGUI() = default;
 
     // Render current selection. Transformation matrices are supposed
     // to be already set.
-    virtual void render(ImGuiWrapper* imgui = nullptr);
+    virtual void render(ImGuiWrapper *imgui);
+    void         render() { this->render(nullptr); }
+
+    void request_update_render_data() { m_update_render_data = true; };
 
 #ifdef PRUSASLICER_TRIANGLE_SELECTOR_DEBUG
     void render_debug(ImGuiWrapper* imgui);
@@ -42,12 +46,15 @@ public:
     bool m_show_invalid{false};
 #endif
 
-private:
-    GLIndexedVertexArray m_iva_enforcers;
-    GLIndexedVertexArray m_iva_blockers;
-    std::array<GLIndexedVertexArray, 3> m_varrays;
 protected:
-    GLIndexedVertexArray m_iva_seed_fill;
+    bool m_update_render_data = false;
+
+private:
+    void update_render_data();
+
+    GLIndexedVertexArray                m_iva_enforcers;
+    GLIndexedVertexArray                m_iva_blockers;
+    std::array<GLIndexedVertexArray, 3> m_varrays;
 };
 
 
@@ -59,12 +66,12 @@ class GLGizmoPainterBase : public GLGizmoBase
 private:
     ObjectID m_old_mo_id;
     size_t m_old_volumes_size = 0;
-    virtual void on_render() const override {}
-    virtual void on_render_for_picking() const override {}
+    void on_render() override {}
+    void on_render_for_picking() override {}
 
 public:
     GLGizmoPainterBase(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id);
-    ~GLGizmoPainterBase() override {}
+    ~GLGizmoPainterBase() override = default;
     virtual void set_painter_gizmo_data(const Selection& selection);
     virtual bool gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down);
 
@@ -75,14 +82,13 @@ public:
     virtual void render_painter_gizmo() const = 0;
 
 protected:
-    void render_triangles(const Selection& selection) const;
+    void render_triangles(const Selection& selection, const bool use_polygon_offset_fill = true) const;
     void render_cursor() const;
     void render_cursor_circle() const;
     void render_cursor_sphere(const Transform3d& trafo) const;
     virtual void update_model_object() const = 0;
     virtual void update_from_model_object() = 0;
     void activate_internal_undo_redo_stack(bool activate);
-    void set_cursor_type(TriangleSelector::CursorType);
 
     virtual std::array<float, 4> get_cursor_sphere_left_button_color() const { return {0.f, 0.f, 1.f, 0.25f}; }
     virtual std::array<float, 4> get_cursor_sphere_right_button_color() const { return {1.f, 0.f, 0.f, 0.25f}; }
@@ -100,9 +106,23 @@ protected:
 
     TriangleSelector::CursorType m_cursor_type = TriangleSelector::SPHERE;
 
-    bool  m_triangle_splitting_enabled = true;
-    bool  m_seed_fill_enabled          = false;
-    float m_seed_fill_angle            = 0.f;
+    enum class ToolType {
+        BRUSH,
+        BUCKET_FILL,
+        SEED_FILL
+    };
+
+    bool     m_triangle_splitting_enabled = true;
+    ToolType m_tool_type                  = ToolType::BRUSH;
+    float    m_seed_fill_angle            = 30.f;
+
+    static constexpr float SeedFillAngleMin  = 0.0f;
+    static constexpr float SeedFillAngleMax  = 90.f;
+    static constexpr float SeedFillAngleStep = 1.f;
+
+    // It stores the value of the previous mesh_id to which the seed fill was applied.
+    // It is used to detect when the mouse has moved from one volume to another one.
+    int      m_seed_fill_last_mesh_id     = -1;
 
     enum class Button {
         None,

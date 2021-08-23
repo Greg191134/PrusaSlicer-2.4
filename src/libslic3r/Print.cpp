@@ -36,7 +36,7 @@ PrintRegion::PrintRegion(PrintRegionConfig &&config) : PrintRegion(std::move(con
 
 void Print::clear() 
 {
-	tbb::mutex::scoped_lock lock(this->state_mutex());
+	std::scoped_lock<std::mutex> lock(this->state_mutex());
     // The following call should stop background processing if it is running.
     this->invalidate_all_steps();
 	for (PrintObject *object : m_objects)
@@ -157,7 +157,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "wipe_tower_x"
             || opt_key == "wipe_tower_y"
             || opt_key == "wipe_tower_rotation_angle") {
-            steps.emplace_back(psSkirt);
+            steps.emplace_back(psSkirtBrim);
         } else if (
                opt_key == "nozzle_diameter"
             || opt_key == "resolution"
@@ -201,7 +201,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "first_layer_speed"
             || opt_key == "z_offset") {
             steps.emplace_back(psWipeTower);
-            steps.emplace_back(psSkirt);
+            steps.emplace_back(psSkirtBrim);
         } else if (opt_key == "filament_soluble") {
             steps.emplace_back(psWipeTower);
             // Soluble support interface / non-soluble base interface produces non-soluble interface layers below soluble interface layers.
@@ -215,8 +215,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             osteps.emplace_back(posPerimeters);
             osteps.emplace_back(posInfill);
             osteps.emplace_back(posSupportMaterial);
-            steps.emplace_back(psSkirt);
-            steps.emplace_back(psBrim);
+            steps.emplace_back(psSkirtBrim);
         } else {
             // for legacy, if we can't handle this option let's invalidate all steps
             //FIXME invalidate all steps of all objects as well?
@@ -239,8 +238,6 @@ bool Print::invalidate_step(PrintStep step)
 {
 	bool invalidated = Inherited::invalidate_step(step);
     // Propagate to dependent steps.
-    if (step == psSkirt)
-		invalidated |= Inherited::invalidate_step(psBrim);
     if (step != psGCodeExport)
         invalidated |= Inherited::invalidate_step(psGCodeExport);
     return invalidated;
@@ -252,7 +249,7 @@ bool Print::is_step_done(PrintObjectStep step) const
 {
     if (m_objects.empty())
         return false;
-    tbb::mutex::scoped_lock lock(this->state_mutex());
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
     for (const PrintObject *object : m_objects)
         if (! object->is_step_done_unguarded(step))
             return false;
@@ -342,12 +339,12 @@ std::vector<ObjectID> Print::print_object_ids() const
 
 bool Print::has_infinite_skirt() const
 {
-    return (m_config.draft_shield && m_config.skirts > 0) || (m_config.ooze_prevention && this->extruders().size() > 1);
+    return (m_config.draft_shield == dsEnabled && m_config.skirts > 0) || (m_config.ooze_prevention && this->extruders().size() > 1);
 }
 
 bool Print::has_skirt() const
 {
-    return (m_config.skirt_height > 0 && m_config.skirts > 0) || this->has_infinite_skirt();
+    return (m_config.skirt_height > 0 && m_config.skirts > 0) || m_config.draft_shield != dsDisabled;
 }
 
 bool Print::has_brim() const
@@ -355,18 +352,12 @@ bool Print::has_brim() const
     return std::any_of(m_objects.begin(), m_objects.end(), [](PrintObject *object) { return object->has_brim(); });
 }
 
-#if ENABLE_SEQUENTIAL_LIMITS
 bool Print::sequential_print_horizontal_clearance_valid(const Print& print, Polygons* polygons)
-#else
-static inline bool sequential_print_horizontal_clearance_valid(const Print &print)
-#endif // ENABLE_SEQUENTIAL_LIMITS
 {
 	Polygons convex_hulls_other;
-#if ENABLE_SEQUENTIAL_LIMITS
     if (polygons != nullptr)
         polygons->clear();
     std::vector<size_t> intersecting_idxs;
-#endif // ENABLE_SEQUENTIAL_LIMITS
 
 	std::map<ObjectID, Polygon> map_model_object_to_convex_hull;
 	for (const PrintObject *print_object : print.objects()) {
@@ -382,7 +373,6 @@ static inline bool sequential_print_horizontal_clearance_valid(const Print &prin
 	        // FIXME: Arrangement has different parameters for offsetting (jtMiter, limit 2)
 	        // which causes that the warning will be showed after arrangement with the
 	        // appropriate object distance. Even if I set this to jtMiter the warning still shows up.
-#if ENABLE_ALLOW_NEGATIVE_Z
             it_convex_hull = map_model_object_to_convex_hull.emplace_hint(it_convex_hull, model_object_id,
                 offset(print_object->model_object()->convex_hull_2d(
                     Geometry::assemble_transform({ 0.0, 0.0, model_instance0->get_offset().z() }, model_instance0->get_rotation(), model_instance0->get_scaling_factor(), model_instance0->get_mirror())),
@@ -390,15 +380,6 @@ static inline bool sequential_print_horizontal_clearance_valid(const Print &prin
                     // exactly by satisfying the extruder_clearance_radius, this test will not trigger collision.
                     float(scale_(0.5 * print.config().extruder_clearance_radius.value - EPSILON)),
                     jtRound, scale_(0.1)).front());
-#else
-	        it_convex_hull = map_model_object_to_convex_hull.emplace_hint(it_convex_hull, model_object_id, 
-                offset(print_object->model_object()->convex_hull_2d(
-	                        Geometry::assemble_transform(Vec3d::Zero(), model_instance0->get_rotation(), model_instance0->get_scaling_factor(), model_instance0->get_mirror())),
-                	// Shrink the extruder_clearance_radius a tiny bit, so that if the object arrangement algorithm placed the objects
-	                // exactly by satisfying the extruder_clearance_radius, this test will not trigger collision.
-	                float(scale_(0.5 * print.config().extruder_clearance_radius.value - EPSILON)),
-	                jtRound, float(scale_(0.1))).front());
-#endif // ENABLE_ALLOW_NEGATIVE_Z
         }
 	    // Make a copy, so it may be rotated for instances.
 	    Polygon convex_hull0 = it_convex_hull->second;
@@ -411,7 +392,6 @@ static inline bool sequential_print_horizontal_clearance_valid(const Print &prin
 	        // instance.shift is a position of a centered object, while model object may not be centered.
 	        // Convert the shift from the PrintObject's coordinates into ModelObject's coordinates by removing the centering offset.
 	        convex_hull.translate(instance.shift - print_object->center_offset());
-#if ENABLE_SEQUENTIAL_LIMITS
             // if output needed, collect indices (inside convex_hulls_other) of intersecting hulls
             for (size_t i = 0; i < convex_hulls_other.size(); ++i) {
                 if (!intersection((Polygons)convex_hulls_other[i], (Polygons)convex_hull).empty()) {
@@ -423,15 +403,10 @@ static inline bool sequential_print_horizontal_clearance_valid(const Print &prin
                     }
                 }
             }
-#else
-            if (!intersection(convex_hulls_other, (Polygons)convex_hull).empty())
-                return false;
-#endif // ENABLE_SEQUENTIAL_LIMITS
             convex_hulls_other.emplace_back(std::move(convex_hull));
 	    }
 	}
 
-#if ENABLE_SEQUENTIAL_LIMITS
     if (!intersecting_idxs.empty()) {
         // use collected indices (inside convex_hulls_other) to update output
         std::sort(intersecting_idxs.begin(), intersecting_idxs.end());
@@ -441,7 +416,6 @@ static inline bool sequential_print_horizontal_clearance_valid(const Print &prin
         }
         return false;
     }
-#endif // ENABLE_SEQUENTIAL_LIMITS
     return true;
 }
 
@@ -655,10 +629,8 @@ std::string Print::validate(std::string* warning) const
             // Notify the user in that case.
             if (! object->has_support() && warning) {
                 for (const ModelVolume* mv : object->model_object()->volumes) {
-                    bool has_enforcers = mv->is_support_enforcer()
-                        || (mv->is_model_part()
-                            && ! mv->supported_facets.empty()
-                            && ! mv->supported_facets.get_facets(*mv, EnforcerBlockerType::ENFORCER).indices.empty());
+                    bool has_enforcers = mv->is_support_enforcer() || 
+                        (mv->is_model_part() && mv->supported_facets.has_facets(*mv, EnforcerBlockerType::ENFORCER));
                     if (has_enforcers) {
                         *warning = "_SUPPORTS_OFF";
                         break;
@@ -863,30 +835,39 @@ void Print::process()
         }
         this->set_done(psWipeTower);
     }
-    if (this->set_started(psSkirt)) {
+    if (this->set_started(psSkirtBrim)) {
+        this->set_status(88, L("Generating skirt and brim"));
+
         m_skirt.clear();
         m_skirt_convex_hull.clear();
         m_first_layer_convex_hull.points.clear();
-        if (this->has_skirt()) {
-            this->set_status(88, L("Generating skirt"));
-            this->_make_skirt();
+        const bool draft_shield = config().draft_shield != dsDisabled;
+
+        if (this->has_skirt() && draft_shield) {
+            // In case that draft shield is active, generate skirt first so brim
+            // can be trimmed to make room for it.
+            _make_skirt();
         }
-        this->set_done(psSkirt);
-    }
-	if (this->set_started(psBrim)) {
+
         m_brim.clear();
         m_first_layer_convex_hull.points.clear();
         if (this->has_brim()) {
-            this->set_status(88, L("Generating brim"));
             Polygons islands_area;
             m_brim = make_brim(*this, this->make_try_cancel(), islands_area);
             for (Polygon &poly : union_(this->first_layer_islands(), islands_area))
                 append(m_first_layer_convex_hull.points, std::move(poly.points));
         }
-        // Brim depends on skirt (brim lines are trimmed by the skirt lines), therefore if
-        // the skirt gets invalidated, brim gets invalidated as well and the following line is called.
+
+
+        if (has_skirt() && ! draft_shield) {
+            // In case that draft shield is NOT active, generate skirt now.
+            // It will be placed around the brim, so brim has to be ready.
+            assert(m_skirt.empty());
+            _make_skirt();
+        }
+
         this->finalize_first_layer_convex_hull();
-        this->set_done(psBrim);
+        this->set_done(psSkirtBrim);
     }
     BOOST_LOG_TRIVIAL(info) << "Slicing process finished." << log_memory_info();
 }
@@ -965,6 +946,10 @@ void Print::_make_skirt()
 
     // Include the wipe tower.
     append(points, this->first_layer_wipe_tower_corners());
+
+    // Unless draft shield is enabled, include all brims as well.
+    if (config().draft_shield == dsDisabled)
+        append(points, m_first_layer_convex_hull.points);
 
     if (points.size() < 3)
         // At least three points required for a convex hull.

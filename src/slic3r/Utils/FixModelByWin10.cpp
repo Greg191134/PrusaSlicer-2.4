@@ -35,6 +35,7 @@
 #include "libslic3r/Format/3mf.hpp"
 #include "../GUI/GUI.hpp"
 #include "../GUI/I18N.hpp"
+#include "../GUI/MsgDialog.hpp"
 
 #include <wx/msgdlg.h>
 #include <wx/progdlg.h>
@@ -340,7 +341,7 @@ void fix_model_by_win10_sdk_gui(ModelObject &model_object, int volume_idx)
 	wxProgressDialog progress_dialog(
 		_L("Model fixing"),
 		_L("Exporting model") + "...",
-		100, nullptr, wxPD_AUTO_HIDE | wxPD_APP_MODAL | wxPD_CAN_ABORT);
+		100, nullptr, wxPD_AUTO_HIDE | wxPD_APP_MODAL | wxPD_CAN_ABORT);  // ! parent of the wxProgressDialog should be nullptr to avoid flickering during the model fixing
 	// Executing the calculation in a background thread, so that the COM context could be created with its own threading model.
 	// (It seems like wxWidgets initialize the COM contex as single threaded and we need a multi-threaded context).
 	bool   success = false;
@@ -361,9 +362,17 @@ void fix_model_by_win10_sdk_gui(ModelObject &model_object, int volume_idx)
 				boost::filesystem::path path_src = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
 				path_src += ".3mf";
 				Model model;
-				ModelObject *model_object = model.add_object();
-				model_object->add_volume(*volumes[ivolume]);
-				model_object->add_instance();
+                ModelObject *mo = model.add_object();
+                mo->add_volume(*volumes[ivolume]);
+
+                // We are about to save a 3mf, fix it by netfabb and load the fixed 3mf back.
+                // store_3mf currently bakes the volume transformation into the mesh itself.
+                // If we then loaded the repaired 3mf and pushed the mesh into the original ModelVolume
+                // (which remembers the matrix the whole time), the transformation would be used twice.
+                // We will therefore set the volume transform on the dummy ModelVolume to identity.
+                mo->volumes.back()->set_transformation(Geometry::Transformation());
+
+                mo->add_instance();
 				if (!Slic3r::store_3mf(path_src.string().c_str(), &model, nullptr, false, nullptr, false)) {
 					boost::filesystem::remove(path_src);
 					throw Slic3r::RuntimeError(L("Export of a temporary 3mf file failed"));
@@ -378,7 +387,8 @@ void fix_model_by_win10_sdk_gui(ModelObject &model_object, int volume_idx)
 	            // PresetBundle bundle;
 				on_progress(L("Loading repaired model"), 80);
 				DynamicPrintConfig config;
-				bool loaded = Slic3r::load_3mf(path_dst.string().c_str(), &config, &model, false);
+				ConfigSubstitutionContext config_substitutions{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+				bool loaded = Slic3r::load_3mf(path_dst.string().c_str(), config, config_substitutions, &model, false);
 			    boost::filesystem::remove(path_dst);
 				if (! loaded)
 	 				throw Slic3r::RuntimeError(L("Import of the repaired 3mf file failed"));
@@ -421,10 +431,10 @@ void fix_model_by_win10_sdk_gui(ModelObject &model_object, int volume_idx)
 	if (canceled) {
 		// Nothing to show.
 	} else if (success) {
-		wxMessageDialog dlg(nullptr, _(L("Model repaired successfully")), _(L("Model Repair by the Netfabb service")), wxICON_INFORMATION | wxOK_DEFAULT);
+		Slic3r::GUI::MessageDialog dlg(nullptr, _L("Model repaired successfully"), _L("Model Repair by the Netfabb service"), wxICON_INFORMATION | wxOK);
 		dlg.ShowModal();
 	} else {
-		wxMessageDialog dlg(nullptr, _(L("Model repair failed:")) + " \n" + _(progress.message), _(L("Model Repair by the Netfabb service")), wxICON_ERROR | wxOK_DEFAULT);
+		Slic3r::GUI::MessageDialog dlg(nullptr, _L("Model repair failed:") + " \n" + _(progress.message), _L("Model Repair by the Netfabb service"), wxICON_ERROR | wxOK);
 		dlg.ShowModal();
 	}
 	worker_thread.join();

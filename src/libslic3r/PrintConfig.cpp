@@ -50,7 +50,7 @@ static t_config_enum_values s_keys_map_GCodeFlavor {
     { "teacup",         gcfTeacup },
     { "makerware",      gcfMakerWare },
     { "marlin",         gcfMarlinLegacy },
-    { "marlinfirmware", gcfMarlinFirmware },
+    { "marlin2",        gcfMarlinFirmware },
     { "sailfish",       gcfSailfish },
     { "smoothie",       gcfSmoothie },
     { "mach3",          gcfMach3 },
@@ -67,6 +67,7 @@ static t_config_enum_values s_keys_map_MachineLimitsUsage {
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(MachineLimitsUsage)
 
 static t_config_enum_values s_keys_map_PrintHostType {
+    { "prusalink",      htPrusaLink },
     { "octoprint",      htOctoPrint },
     { "duet",           htDuet },
     { "flashair",       htFlashAir },
@@ -172,6 +173,20 @@ static const t_config_enum_values s_keys_map_BrimType = {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(BrimType)
 
+static const t_config_enum_values s_keys_map_DraftShield = {
+    { "disabled", dsDisabled },
+    { "limited",  dsLimited  },
+    { "enabled",  dsEnabled  }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(DraftShield)
+
+static const t_config_enum_values s_keys_map_ForwardCompatibilitySubstitutionRule = {
+    { "disable",        ForwardCompatibilitySubstitutionRule::Disable },
+    { "enable",         ForwardCompatibilitySubstitutionRule::Enable },
+    { "enable_silent",  ForwardCompatibilitySubstitutionRule::EnableSilent }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(ForwardCompatibilitySubstitutionRule)
+
 static void assign_printer_technology_to_unknown(t_optiondef_map &options, PrinterTechnology printer_technology)
 {
     for (std::pair<const t_config_option_key, ConfigOptionDef> &kvp : options)
@@ -219,7 +234,7 @@ void PrintConfigDef::init_common_params()
 
     def = this->add("thumbnails", coPoints);
     def->label = L("G-code thumbnails");
-    def->tooltip = L("Picture sizes to be stored into a .gcode and .sl1 files, in the following format: \"XxY, XxY, ...\"");
+    def->tooltip = L("Picture sizes to be stored into a .gcode and .sl1 / .sl1s files, in the following format: \"XxY, XxY, ...\"");
     def->mode = comExpert;
     def->gui_type = ConfigOptionDef::GUIType::one_string;
     def->set_default_value(new ConfigOptionPoints());
@@ -280,7 +295,7 @@ void PrintConfigDef::init_common_params()
     def->sidetext = L("mm");
     def->min = 0;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.2));
+    def->set_default_value(new ConfigOptionFloat(0.));
 
     // Options used by physical printers
     
@@ -301,6 +316,12 @@ void PrintConfigDef::init_common_params()
     def->tooltip = L("Names of presets related to the physical printer");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionStrings());
+
+    // temporary workaround for compatibility with older Slicer
+    {
+        def = this->add("preset_name", coString);
+        def->set_default_value(new ConfigOptionString());
+    }
 
     def = this->add("printhost_authorization_type", coEnum);
     def->label = L("Authorization Type");
@@ -447,6 +468,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Horizontal width of the brim that will be printed around each object on the first layer.");
     def->sidetext = L("mm");
     def->min = 0;
+    def->max = 200;
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionFloat(0));
 
@@ -469,10 +491,11 @@ void PrintConfigDef::init_fff_params()
     def = this->add("brim_offset", coFloat);
     def->label = L("Brim offset");
     def->category = L("Skirt and brim");
-    def->tooltip = L("The offset of the brim from the printed object.");
+    def->tooltip = L("The offset of the brim from the printed object. The offset is applied after the elephant foot compensation.");
     def->sidetext = L("mm");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloat(0));
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.f));
 
     def = this->add("clip_multipart_objects", coBool);
     def->label = L("Clip multi-part objects");
@@ -1245,7 +1268,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("teacup");
     def->enum_values.push_back("makerware");
     def->enum_values.push_back("marlin");
-    def->enum_values.push_back("marlinfirmware");
+    def->enum_values.push_back("marlin2");
     def->enum_values.push_back("sailfish");
     def->enum_values.push_back("mach3");
     def->enum_values.push_back("machinekit");
@@ -1257,7 +1280,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back("Teacup");
     def->enum_labels.push_back("MakerWare (MakerBot)");
     def->enum_labels.push_back("Marlin (legacy)");
-    def->enum_labels.push_back("Marlin Firmware");
+    def->enum_labels.push_back("Marlin 2");
     def->enum_labels.push_back("Sailfish (MakerBot)");
     def->enum_labels.push_back("Mach3/LinuxCNC");
     def->enum_labels.push_back("Machinekit");
@@ -1435,6 +1458,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Maximum width of a segmented region. Zero disables this feature.");
     def->sidetext = L("mm (zero to disable)");
     def->min = 0;
+    def->category = L("Advanced");
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionFloat(0.f));
 
@@ -1772,11 +1796,13 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Slic3r can upload G-code files to a printer host. This field must contain "
                    "the kind of the host.");
     def->enum_keys_map = &ConfigOptionEnum<PrintHostType>::get_enum_values();
+    def->enum_values.push_back("prusalink");
     def->enum_values.push_back("octoprint");
     def->enum_values.push_back("duet");
     def->enum_values.push_back("flashair");
     def->enum_values.push_back("astrobox");
     def->enum_values.push_back("repetier");
+    def->enum_labels.push_back("PrusaLink");
     def->enum_labels.push_back("OctoPrint");
     def->enum_labels.push_back("Duet");
     def->enum_labels.push_back("FlashAir");
@@ -2137,27 +2163,34 @@ void PrintConfigDef::init_fff_params()
 #endif
 
     def = this->add("skirt_distance", coFloat);
-    def->label = L("Distance from object");
-    def->tooltip = L("Distance between skirt and object(s). Set this to zero to attach the skirt "
-                   "to the object(s) and get a brim for better adhesion.");
+    def->label = L("Distance from brim/object");
+    def->tooltip = L("Distance between skirt and brim (when draft shield is not used) or objects.");
     def->sidetext = L("mm");
     def->min = 0;
     def->set_default_value(new ConfigOptionFloat(6));
 
     def = this->add("skirt_height", coInt);
     def->label = L("Skirt height");
-    def->tooltip = L("Height of skirt expressed in layers. Set this to a tall value to use skirt "
-                   "as a shield against drafts.");
+    def->tooltip = L("Height of skirt expressed in layers.");
     def->sidetext = L("layers");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(1));
 
-    def = this->add("draft_shield", coBool);
+    def = this->add("draft_shield", coEnum);
     def->label = L("Draft shield");
-    def->tooltip = L("If enabled, the skirt will be as tall as a highest printed object. "
+    def->tooltip = L("With draft shield active, the skirt will be printed skirt_distance from the object, possibly intersecting brim.\n"
+                     "Enabled = skirt is as tall as the highest printed object.\n"
+                     "Limited = skirt is as tall as specified by skirt_height.\n"
     				 "This is useful to protect an ABS or ASA print from warping and detaching from print bed due to wind draft.");
+    def->enum_keys_map = &ConfigOptionEnum<DraftShield>::get_enum_values();
+    def->enum_values.push_back("disabled");
+    def->enum_values.push_back("limited");
+    def->enum_values.push_back("enabled");
+    def->enum_labels.push_back(L("Disabled"));
+    def->enum_labels.push_back(L("Limited"));
+    def->enum_labels.push_back(L("Enabled"));
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
+    def->set_default_value(new ConfigOptionEnum<DraftShield>(dsDisabled));
 
     def = this->add("skirts", coInt);
     def->label = L("Loops (minimum)");
@@ -3608,8 +3641,12 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         } catch (boost::bad_lexical_cast &) {
             value = "0";
         }
-    } else if (opt_key == "gcode_flavor" && value == "makerbot") {
-        value = "makerware";
+    } else if (opt_key == "gcode_flavor") {
+        if (value == "makerbot")
+            value = "makerware";
+        else if (value == "marlinfirmware")
+            // the "new" marlin firmware flavor used to be called "marlinfirmware" for some time during PrusaSlicer 2.4.0-alpha development.
+            value = "marlin2";
     } else if (opt_key == "fill_density" && value.find("%") == std::string::npos) {
         try {
             // fill_density was turned into a percent value
@@ -3622,7 +3659,7 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
     } else if (opt_key == "bed_size" && !value.empty()) {
         opt_key = "bed_shape";
         ConfigOptionPoint p;
-        p.deserialize(value);
+        p.deserialize(value, ForwardCompatibilitySubstitutionRule::Disable);
         std::ostringstream oss;
         oss << "0x0," << p.value(0) << "x0," << p.value(0) << "x" << p.value(1) << ",0x" << p.value(1);
         value = oss.str();
@@ -3638,9 +3675,12 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         value = "rectilinear";
     } else if (opt_key == "skirt_height" && value == "-1") {
     	// PrusaSlicer no more accepts skirt_height == -1 to print a draft shield to the top of the highest object.
-    	// A new "draft_shield" boolean config value is used instead.
+        // A new "draft_shield" enum config value is used instead.
     	opt_key = "draft_shield";
-    	value = "1";
+        value = "enabled";
+    } else if (opt_key == "draft_shield" && (value == "1" || value == "0")) {
+        // draft_shield used to be a bool, it was turned into an enum in PrusaSlicer 2.4.0.
+        value = value == "1" ? "enabled" : "disabled";
     } else if (opt_key == "octoprint_host") {
         opt_key = "print_host";
     } else if (opt_key == "octoprint_cafile") {
@@ -4115,6 +4155,11 @@ CLITransformConfigDef::CLITransformConfigDef()
     def->label = L("Don't arrange");
     def->tooltip = L("Do not rearrange the given models before merging and keep their original XY coordinates.");
 
+    def = this->add("ensure_on_bed", coBool);
+    def->label = L("Ensure on bed");
+    def->tooltip = L("Lift the object above the bed when it is partially below. Enabled by default, use --no-ensure-on-bed to disable.");
+    def->set_default_value(new ConfigOptionBool(true));
+
     def = this->add("duplicate", coInt);
     def->label = L("Duplicate");
     def->tooltip =L("Multiply copies by this factor.");
@@ -4170,6 +4215,20 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def = this->add("ignore_nonexistent_config", coBool);
     def->label = L("Ignore non-existent config files");
     def->tooltip = L("Do not fail if a file supplied to --load does not exist.");
+
+    def = this->add("config_compatibility", coEnum);
+    def->label = L("Forward-compatibility rule when loading configurations from config files and project files (3MF, AMF).");
+    def->tooltip = L("This version of PrusaSlicer may not understand configurations produced by newest PrusaSlicer versions. "
+                     "For example, newer PrusaSlicer may extend the list of supported firmware flavors. One may decide to "
+                     "bail out or to substitute an unknown value with a default silently or verbosely.");
+    def->enum_keys_map = &ConfigOptionEnum<ForwardCompatibilitySubstitutionRule>::get_enum_values();
+    def->enum_values.push_back("disable");
+    def->enum_values.push_back("enable");
+    def->enum_values.push_back("enable_silent");
+    def->enum_labels.push_back(L("Bail out on unknown configuration values"));
+    def->enum_labels.push_back(L("Enable reading unknown configuration values by verbosely substituting them with defaults."));
+    def->enum_labels.push_back(L("Enable reading unknown configuration values by silently substituting them with defaults."));
+    def->set_default_value(new ConfigOptionEnum<ForwardCompatibilitySubstitutionRule>(ForwardCompatibilitySubstitutionRule::Enable));
 
     def = this->add("load", coStrings);
     def->label = L("Load config file");

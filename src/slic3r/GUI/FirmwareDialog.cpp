@@ -65,6 +65,8 @@ enum {
 	USB_PID_MMU_APP  = 4,
 	USB_PID_CW1_BOOT = 7,
 	USB_PID_CW1_APP  = 8,
+	USB_PID_CW1S_BOOT = 14,
+	USB_PID_CW1S_APP  = 15,
 };
 
 // This enum discriminates the kind of information in EVT_AVRDUDE,
@@ -308,7 +310,7 @@ void FirmwareDialog::priv::update_flash_enabled()
 void FirmwareDialog::priv::load_hex_file(const wxString &path)
 {
 	hex_file = HexFile(path.wx_str());
-	const bool autodetect = hex_file.device == HexFile::DEV_MM_CONTROL || hex_file.device == HexFile::DEV_CW1;
+	const bool autodetect = hex_file.device == HexFile::DEV_MM_CONTROL || hex_file.device == HexFile::DEV_CW1 || hex_file.device == HexFile::DEV_CW1S;
 	set_autodetect(autodetect);
 }
 
@@ -636,6 +638,10 @@ void FirmwareDialog::priv::perform_upload()
 					this->prepare_avr109(Avr109Pid(USB_PID_CW1_BOOT, USB_PID_CW1_APP));
 					break;
 
+				case HexFile::DEV_CW1S:
+					this->prepare_avr109(Avr109Pid(USB_PID_CW1S_BOOT, USB_PID_CW1S_APP));
+					break;
+
 				default:
 					this->prepare_mk2();
 					break;
@@ -747,7 +753,8 @@ void FirmwareDialog::priv::on_avrdude(const wxCommandEvent &evt)
 
 void FirmwareDialog::priv::on_async_dialog(const wxCommandEvent &evt)
 {
-	wxMessageDialog dlg(this->q, evt.GetString(), wxMessageBoxCaptionStr, wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);
+	//wxMessageDialog dlg(this->q, evt.GetString(), wxMessageBoxCaptionStr, wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);
+	GUI::MessageDialog dlg(this->q, evt.GetString(), wxMessageBoxCaptionStr, wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		modal_response = dlg.ShowModal();
@@ -766,11 +773,10 @@ const char* FirmwareDialog::priv::avr109_dev_name(Avr109Pid usb_pid) {
 	switch (usb_pid.boot) {
 		case USB_PID_MMU_BOOT:
 			return "Original Prusa MMU 2.0 Control";
-		break;
 		case USB_PID_CW1_BOOT:
 			return "Original Prusa CW1";
-		break;
-
+		case USB_PID_CW1S_BOOT:
+			return "Original Prusa CW1S";
 		default: throw Slic3r::RuntimeError((boost::format("Invalid avr109 device USB PID: %1%") % usb_pid.boot).str());
 	}
 }
@@ -863,6 +869,8 @@ FirmwareDialog::FirmwareDialog(wxWindow *parent) :
 	bsizer->Add(p->btn_flash);
 	vsizer->Add(bsizer, 0, wxEXPAND);
 
+	GUI::wxGetApp().UpdateDlgDarkUI(this);
+
 	auto *topsizer = new wxBoxSizer(wxVERTICAL);
 	topsizer->Add(panel, 1, wxEXPAND | wxALL, DIALOG_MARGIN);
 	SetMinSize(wxSize(p->min_width, p->min_height));
@@ -903,7 +911,8 @@ FirmwareDialog::FirmwareDialog(wxWindow *parent) :
 	p->btn_flash->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
 		if (this->p->avrdude) {
 			// Flashing is in progress, ask the user if they're really sure about canceling it
-			wxMessageDialog dlg(this,
+			//wxMessageDialog dlg(this,
+			GUI::MessageDialog dlg(this,
 				_(L("Are you sure you want to cancel firmware flashing?\nThis could leave your printer in an unusable state!")),
 				_(L("Confirmation")),
 				wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);

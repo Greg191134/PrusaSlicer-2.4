@@ -14,7 +14,6 @@
 #include <boost/container/static_vector.hpp>
 
 #include <tbb/parallel_for.h>
-#include <tbb/atomic.h>
 #include <tbb/spin_mutex.h>
 #include <tbb/task_group.h>
 
@@ -1354,9 +1353,9 @@ struct SupportAnnotations
         object.project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, blockers_layers);
     }
 
-    std::vector<ExPolygons>         enforcers_layers;
-    std::vector<ExPolygons>         blockers_layers;
-    const std::vector<Polygons>&    buildplate_covered;
+    std::vector<Polygons>         enforcers_layers;
+    std::vector<Polygons>         blockers_layers;
+    const std::vector<Polygons>&  buildplate_covered;
 };
 
 struct SlicesMarginCache

@@ -45,11 +45,10 @@ enum PrintStep {
     // psToolOrdering is a synonym to psWipeTower, as the Wipe Tower calculates and modifies the ToolOrdering,
     // while if printing without the Wipe Tower, the ToolOrdering is calculated as well.
     psToolOrdering = psWipeTower,
-    psSkirt, 
-    psBrim,
+    psSkirtBrim,
     // Last step before G-code export, after this step is finished, the initial extrusion path preview
     // should be refreshed.
-    psSlicingFinished = psBrim,
+    psSlicingFinished = psSkirtBrim,
     psGCodeExport,
     psCount,
 };
@@ -254,6 +253,9 @@ public:
     ConstLayerPtrsAdaptor        layers() const         { return ConstLayerPtrsAdaptor(&m_layers); }
     ConstSupportLayerPtrsAdaptor support_layers() const { return ConstSupportLayerPtrsAdaptor(&m_support_layers); }
     const Transform3d&           trafo() const          { return m_trafo; }
+    // Trafo with the center_offset() applied after the transformation, to center the object in XY before slicing.
+    Transform3d                  trafo_centered() const 
+        { Transform3d t = this->trafo(); t.pretranslate(Vec3d(- unscale<double>(m_center_offset.x()), - unscale<double>(m_center_offset.y()), 0)); return t; }
     const PrintInstances&        instances() const      { return m_instances; }
 
     // Whoever will get a non-const pointer to PrintObject will be able to modify its layers.
@@ -318,6 +320,8 @@ public:
     bool                        has_support()           const { return m_config.support_material || m_config.support_material_enforce_layers > 0; }
     bool                        has_raft()              const { return m_config.raft_layers > 0; }
     bool                        has_support_material()  const { return this->has_support() || this->has_raft(); }
+    // Checks if the model object is painted using the multi-material painting gizmo.
+    bool                        is_mm_painted()         const { return this->model_object()->is_mm_painted(); };
 
     // returns 0-based indices of extruders used to print the object (without brim, support and other helper extrusions)
     std::vector<unsigned int>   object_extruders() const;
@@ -326,12 +330,12 @@ public:
     void slice();
 
     // Helpers to slice support enforcer / blocker meshes by the support generator.
-    std::vector<ExPolygons>     slice_support_volumes(const ModelVolumeType model_volume_type) const;
-    std::vector<ExPolygons>     slice_support_blockers() const { return this->slice_support_volumes(ModelVolumeType::SUPPORT_BLOCKER); }
-    std::vector<ExPolygons>     slice_support_enforcers() const { return this->slice_support_volumes(ModelVolumeType::SUPPORT_ENFORCER); }
+    std::vector<Polygons>       slice_support_volumes(const ModelVolumeType model_volume_type) const;
+    std::vector<Polygons>       slice_support_blockers() const { return this->slice_support_volumes(ModelVolumeType::SUPPORT_BLOCKER); }
+    std::vector<Polygons>       slice_support_enforcers() const { return this->slice_support_volumes(ModelVolumeType::SUPPORT_ENFORCER); }
 
     // Helpers to project custom facets on slices
-    void project_and_append_custom_facets(bool seam, EnforcerBlockerType type, std::vector<ExPolygons>& expolys) const;
+    void project_and_append_custom_facets(bool seam, EnforcerBlockerType type, std::vector<Polygons>& expolys) const;
 
 private:
     // to be called from Print only.
@@ -584,9 +588,7 @@ public:
     const PrintRegion&          get_print_region(size_t idx) const  { return *m_print_regions[idx]; }
     const ToolOrdering&         get_tool_ordering() const { return m_wipe_tower_data.tool_ordering; }
 
-#if ENABLE_SEQUENTIAL_LIMITS
     static bool sequential_print_horizontal_clearance_valid(const Print& print, Polygons* polygons = nullptr);
-#endif // ENABLE_SEQUENTIAL_LIMITS
 
 protected:
     // Invalidates the step, and its depending steps in Print.

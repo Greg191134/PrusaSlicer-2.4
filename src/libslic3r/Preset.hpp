@@ -113,6 +113,9 @@ public:
         TYPE_SLA_MATERIAL,
         TYPE_PRINTER,
         TYPE_COUNT,
+        // This type is here to support PresetConfigSubstitutions for physical printers, however it does not belong to the Preset class,
+        // PhysicalPrinter class is used instead.
+        TYPE_PHYSICAL_PRINTER,
     };
 
     Type                type        = TYPE_INVALID;
@@ -251,6 +254,27 @@ enum class PresetSelectCompatibleType {
 	Always
 };
 
+// Substitutions having been performed during parsing a single configuration file.
+struct PresetConfigSubstitutions {
+    // User readable preset name.
+    std::string                             preset_name;
+    // Type of the preset (Print / Filament / Printer ...)
+    Preset::Type                            preset_type;
+    enum class Source {
+        UserFile,
+        ConfigBundle,
+    };
+    Source                                  preset_source;
+    // Source of the preset. It may be empty in case of a ConfigBundle being loaded.
+    std::string                             preset_file;
+    // What config value has been substituted with what.
+    ConfigSubstitutions                     substitutions;
+};
+
+// Substitutions having been performed during parsing a set of configuration files, for example when starting up
+// PrusaSlicer and reading the user Print / Filament / Printer profiles.
+using PresetsConfigSubstitutions = std::vector<PresetConfigSubstitutions>;
+
 // Collections of presets of the same type (one of the Print, Filament or Printer type).
 class PresetCollection
 {
@@ -280,7 +304,7 @@ public:
     void            add_default_preset(const std::vector<std::string> &keys, const Slic3r::StaticPrintConfig &defaults, const std::string &preset_name);
 
     // Load ini files of the particular type from the provided directory path.
-    void            load_presets(const std::string &dir_path, const std::string &subdir);
+    void            load_presets(const std::string &dir_path, const std::string &subdir, PresetsConfigSubstitutions& substitutions, ForwardCompatibilitySubstitutionRule rule);
 
     // Load a preset from an already parsed config file, insert it into the sorted sequence of presets
     // and select it, losing previous modifications.
@@ -346,10 +370,8 @@ public:
     Preset&         get_edited_preset()         { return m_edited_preset; }
     const Preset&   get_edited_preset() const   { return m_edited_preset; }
 
-#if ENABLE_PROJECT_DIRTY_STATE
     // Return the last saved preset.
     const Preset& get_saved_preset() const { return m_saved_preset; }
-#endif // ENABLE_PROJECT_DIRTY_STATE
 
     // Return vendor of the first parent profile, for which the vendor is defined, or null if such profile does not exist.
     PresetWithVendorProfile get_preset_with_vendor_profile(const Preset &preset) const;
@@ -370,15 +392,11 @@ public:
     // Return a preset by an index. If the preset is active, a temporary copy is returned.
     Preset&         preset(size_t idx)          { return (idx == m_idx_selected) ? m_edited_preset : m_presets[idx]; }
     const Preset&   preset(size_t idx) const    { return const_cast<PresetCollection*>(this)->preset(idx); }
-#if ENABLE_PROJECT_DIRTY_STATE
     void            discard_current_changes() {
         m_presets[m_idx_selected].reset_dirty();
         m_edited_preset = m_presets[m_idx_selected];
         update_saved_preset_from_current_preset();
     }
-#else
-    void            discard_current_changes()   { m_presets[m_idx_selected].reset_dirty(); m_edited_preset = m_presets[m_idx_selected]; }
-#endif // ENABLE_PROJECT_DIRTY_STATE
 
     // Return a preset by its name. If the preset is active, a temporary copy is returned.
     // If a preset is not found by its name, null is returned.
@@ -445,7 +463,8 @@ public:
     size_t          num_visible() const { return std::count_if(m_presets.begin(), m_presets.end(), [](const Preset &preset){return preset.is_visible;}); }
 
     // Compare the content of get_selected_preset() with get_edited_preset() configs, return true if they differ.
-    bool                        current_is_dirty() const { return ! this->current_dirty_options().empty(); }
+    bool                        current_is_dirty() const 
+        { return is_dirty(&this->get_edited_preset(), &this->get_selected_preset()); }
     // Compare the content of get_selected_preset() with get_edited_preset() configs, return the list of keys where they differ.
     std::vector<std::string>    current_dirty_options(const bool deep_compare = false) const
         { return dirty_options(&this->get_edited_preset(), &this->get_selected_preset(), deep_compare); }
@@ -453,15 +472,14 @@ public:
     std::vector<std::string>    current_different_from_parent_options(const bool deep_compare = false) const
         { return dirty_options(&this->get_edited_preset(), this->get_selected_preset_parent(), deep_compare); }
 
-#if ENABLE_PROJECT_DIRTY_STATE
     // Compare the content of get_saved_preset() with get_edited_preset() configs, return true if they differ.
-    bool                        saved_is_dirty() const { return !this->saved_dirty_options().empty(); }
+    bool                        saved_is_dirty() const 
+        { return is_dirty(&this->get_edited_preset(), &this->get_saved_preset()); }
     // Compare the content of get_saved_preset() with get_edited_preset() configs, return the list of keys where they differ.
-    std::vector<std::string>    saved_dirty_options(const bool deep_compare = false) const
-        { return dirty_options(&this->get_edited_preset(), &this->get_saved_preset(), deep_compare); }
+//    std::vector<std::string>    saved_dirty_options() const
+//        { return dirty_options(&this->get_edited_preset(), &this->get_saved_preset(), /* deep_compare */ false); }
     // Copy edited preset into saved preset.
     void                        update_saved_preset_from_current_preset() { m_saved_preset = m_edited_preset; }
-#endif // ENABLE_PROJECT_DIRTY_STATE
 
     // Return a sorted list of system preset names.
     // Used for validating the "inherits" flag when importing user's config bundles.
@@ -536,7 +554,8 @@ private:
 
     size_t update_compatible_internal(const PresetWithVendorProfile &active_printer, const PresetWithVendorProfile *active_print, PresetSelectCompatibleType unselect_if_incompatible);
 public:
-    static std::vector<std::string> dirty_options(const Preset *edited, const Preset *reference, const bool is_printer_type = false);
+    static bool                     is_dirty(const Preset *edited, const Preset *reference);
+    static std::vector<std::string> dirty_options(const Preset *edited, const Preset *reference, const bool deep_compare = false);
 private:
     // Type of this PresetCollection: TYPE_PRINT, TYPE_FILAMENT or TYPE_PRINTER.
     Preset::Type            m_type;
@@ -550,10 +569,8 @@ private:
     std::map<std::string, std::string> m_map_system_profile_renamed;
     // Initially this preset contains a copy of the selected preset. Later on, this copy may be modified by the user.
     Preset                  m_edited_preset;
-#if ENABLE_PROJECT_DIRTY_STATE
     // Contains a copy of the last saved selected preset.
     Preset                  m_saved_preset;
-#endif // ENABLE_PROJECT_DIRTY_STATE
 
     // Selected preset.
     size_t                  m_idx_selected;
@@ -578,7 +595,7 @@ public:
 
     const Preset&   default_preset_for(const DynamicPrintConfig &config) const override;
 
-    const Preset*   find_by_model_id(const std::string &model_id) const;
+    const Preset*   find_system_preset_by_model_and_variant(const std::string &model_id, const std::string &variant) const;
 
 private:
     PrinterPresetCollection() = default;
@@ -692,7 +709,7 @@ public:
     const std::deque<PhysicalPrinter>& operator()() const { return m_printers; }
 
     // Load ini files of the particular type from the provided directory path.
-    void            load_printers(const std::string& dir_path, const std::string& subdir);
+    void            load_printers(const std::string& dir_path, const std::string& subdir, PresetsConfigSubstitutions& substitutions, ForwardCompatibilitySubstitutionRule rule);
     void            load_printers_from_presets(PrinterPresetCollection &printer_presets);
     // Load printer from the loaded configuration
     void            load_printer(const std::string& path, const std::string& name, DynamicPrintConfig&& config, bool select, bool save=false);

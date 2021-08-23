@@ -12,15 +12,18 @@ namespace Slic3r {
 enum class EnforcerBlockerType : int8_t;
 
 
-
 // Following class holds information about selected triangles. It also has power
 // to recursively subdivide the triangles and make the selection finer.
 class TriangleSelector {
 public:
     enum CursorType {
         CIRCLE,
-        SPHERE
+        SPHERE,
+        POINTER
     };
+
+    std::pair<std::vector<Vec3i>, std::vector<Vec3i>> precompute_all_neighbors() const;
+    void precompute_all_neighbors_recursive(int facet_idx, const Vec3i &neighbors, const Vec3i &neighbors_propagated, std::vector<Vec3i> &neighbors_out, std::vector<Vec3i> &neighbors_normal_out) const;
 
     // Set a limit to the edge length, below which the edge will not be split by select_patch().
     // Called by select_patch() internally. Made public for debugging purposes, see TriangleSelectorGUI::render_debug().
@@ -29,6 +32,10 @@ public:
     // Create new object on a TriangleMesh. The referenced mesh must
     // stay valid, a ptr to it is saved and used.
     explicit TriangleSelector(const TriangleMesh& mesh);
+
+    // Returns the facet_idx of the unsplit triangle containing the "hit". Returns -1 if the triangle isn't found.
+    [[nodiscard]] int select_unsplit_triangle(const Vec3f &hit, int facet_idx) const;
+    [[nodiscard]] int select_unsplit_triangle(const Vec3f &hit, int facet_idx, const Vec3i &neighbors) const;
 
     // Select all triangles fully inside the circle, subdivide where needed.
     void select_patch(const Vec3f        &hit,         // point where to start
@@ -42,16 +49,29 @@ public:
 
     void seed_fill_select_triangles(const Vec3f &hit,               // point where to start
                                     int          facet_start,       // facet of the original mesh (unsplit) that the hit point belongs to
-                                    float        seed_fill_angle);  // the maximal angle between two facets to be painted by the same color
+                                    float        seed_fill_angle,   // the maximal angle between two facets to be painted by the same color
+                                    bool         force_reselection = false); // force reselection of the triangle mesh even in cases that mouse is pointing on the selected triangle
 
-    // Get facets currently in the given state.
+    void bucket_fill_select_triangles(const Vec3f &hit,             // point where to start
+                                      int          facet_start,     // facet of the original mesh (unsplit) that the hit point belongs to
+                                      bool         propagate,       // if bucket fill is propagated to neighbor faces or if it fills the only facet of the modified mesh that the hit point belongs to.
+                                      bool         force_reselection = false); // force reselection of the triangle mesh even in cases that mouse is pointing on the selected triangle
+
+    bool                 has_facets(EnforcerBlockerType state) const;
+    static bool          has_facets(const std::pair<std::vector<std::pair<int, int>>, std::vector<bool>> &data, EnforcerBlockerType test_state);
+    int                  num_facets(EnforcerBlockerType state) const;
+    // Get facets at a given state. Don't triangulate T-joints.
     indexed_triangle_set get_facets(EnforcerBlockerType state) const;
+    // Get facets at a given state. Triangulate T-joints.
+    indexed_triangle_set get_facets_strict(EnforcerBlockerType state) const;
+    // Get edges around the selected area by seed fill.
+    std::vector<Vec2i> get_seed_fill_contour() const;
 
     // Set facet of the mesh to a given state. Only works for original triangles.
     void set_facet(int facet_idx, EnforcerBlockerType state);
 
     // Clear everything and make the tree empty.
-    void reset(const EnforcerBlockerType reset_state = EnforcerBlockerType{0});
+    void reset();
 
     // Remove all unnecessary data.
     void garbage_collect();
@@ -61,7 +81,7 @@ public:
     std::pair<std::vector<std::pair<int, int>>, std::vector<bool>> serialize() const;
 
     // Load serialized data. Assumes that correct mesh is loaded.
-    void deserialize(const std::pair<std::vector<std::pair<int, int>>, std::vector<bool>> &data, const EnforcerBlockerType init_state = EnforcerBlockerType{0});
+    void deserialize(const std::pair<std::vector<std::pair<int, int>>, std::vector<bool>> &data, bool needs_reset = true);
 
     // For all triangles, remove the flag indicating that the triangle was selected by seed fill.
     void seed_fill_unselect_all_triangles();
@@ -84,7 +104,6 @@ protected:
             // Initialize bit fields. Default member initializers are not supported by C++17.
             m_selected_by_seed_fill = false;
             m_valid = true;
-            old_number_of_splits = 0;
         }
         // Indices into m_vertices.
         std::array<int, 3> verts_idxs;
@@ -96,7 +115,7 @@ protected:
         std::array<int, 4> children;
 
         // Set the division type.
-        void set_division(int sides_to_split, int special_side_idx = -1);
+        void set_division(int sides_to_split, int special_side_idx);
 
         // Get/set current state.
         void set_state(EnforcerBlockerType type) { assert(! is_split()); state = type; }
@@ -109,13 +128,11 @@ protected:
         bool is_selected_by_seed_fill() const { assert(! is_split()); return m_selected_by_seed_fill; }
 
         // Is this triangle valid or marked to be removed?
-        bool valid() const throw() { return m_valid; }
+        bool valid() const noexcept { return m_valid; }
         // Get info on how it's split.
-        bool is_split() const throw() { return number_of_split_sides() != 0; }
-        int number_of_split_sides() const throw() { return number_of_splits; }
-        int special_side() const throw() { assert(is_split()); return special_side_idx; }
-        bool was_split_before() const throw() { return old_number_of_splits != 0; }
-        void forget_history() { old_number_of_splits = 0; }
+        bool is_split() const noexcept { return number_of_split_sides() != 0; }
+        int number_of_split_sides() const noexcept { return number_of_splits; }
+        int special_side() const noexcept { assert(is_split()); return special_side_idx; }
 
     private:
         friend TriangleSelector;
@@ -130,12 +147,6 @@ protected:
         bool m_selected_by_seed_fill : 1;
         // Is this triangle valid or marked to be removed?
         bool m_valid : 1;
-
-        // How many children were spawned during last split?
-        // Is not reset on remerging the triangle.
-        int old_number_of_splits : 3;
-
-        // there are still 3 bits available at the last byte :-)
     };
 
     struct Vertex {
@@ -185,16 +196,53 @@ protected:
 
     // Private functions:
 private:
-    bool select_triangle(int facet_idx, EnforcerBlockerType type, bool recursive_call = false, bool triangle_splitting = true);
+    bool select_triangle(int facet_idx, EnforcerBlockerType type, bool triangle_splitting);
+    bool select_triangle_recursive(int facet_idx, const Vec3i &neighbors, EnforcerBlockerType type, bool triangle_splitting);
     int  vertices_inside(int facet_idx) const;
     bool faces_camera(int facet) const;
     void undivide_triangle(int facet_idx);
-    void split_triangle(int facet_idx);
+    void split_triangle(int facet_idx, const Vec3i &neighbors);
     void remove_useless_children(int facet_idx); // No hidden meaning. Triangles are meant.
     bool is_pointer_in_triangle(int facet_idx) const;
     bool is_edge_inside_cursor(int facet_idx) const;
-    void push_triangle(int a, int b, int c, int source_triangle, const EnforcerBlockerType state = EnforcerBlockerType{0});
-    void perform_split(int facet_idx, EnforcerBlockerType old_state);
+    int  push_triangle(int a, int b, int c, int source_triangle, EnforcerBlockerType state = EnforcerBlockerType{0});
+    void perform_split(int facet_idx, const Vec3i &neighbors, EnforcerBlockerType old_state);
+    Vec3i child_neighbors(const Triangle &tr, const Vec3i &neighbors, int child_idx) const;
+    Vec3i child_neighbors_propagated(const Triangle &tr, const Vec3i &neighbors, int child_idx) const;
+    // Return child of itriangle at a CCW oriented side (vertexi, vertexj), either first or 2nd part.
+    // If itriangle == -1 or if the side sharing (vertexi, vertexj) is not split, return -1.
+    enum class Partition {
+        First,
+        Second,
+    };
+    int neighbor_child(const Triangle& tr, int vertexi, int vertexj, Partition partition) const;
+    int neighbor_child(int itriangle, int vertexi, int vertexj, Partition partition) const;
+    int triangle_midpoint(const Triangle& tr, int vertexi, int vertexj) const;
+    int triangle_midpoint(int itriangle, int vertexi, int vertexj) const;
+    int triangle_midpoint_or_allocate(int itriangle, int vertexi, int vertexj);
+
+    static std::pair<int, int> triangle_subtriangles(const Triangle &tr, int vertexi, int vertexj);
+    std::pair<int, int>        triangle_subtriangles(int itriangle, int vertexi, int vertexj) const;
+
+    void append_touching_subtriangles(int itriangle, int vertexi, int vertexj, std::vector<int> &touching_subtriangles_out) const;
+    void append_touching_edges(int itriangle, int vertexi, int vertexj, std::vector<Vec2i> &touching_edges_out) const;
+
+#ifndef NDEBUG
+    bool verify_triangle_neighbors(const Triangle& tr, const Vec3i& neighbors) const;
+    bool verify_triangle_midpoints(const Triangle& tr) const;
+#endif // NDEBUG
+
+    void get_facets_strict_recursive(
+        const Triangle                              &tr,
+        const Vec3i                                 &neighbors,
+        EnforcerBlockerType                          state,
+        std::vector<stl_triangle_vertex_indices>    &out_triangles) const;
+    void get_facets_split_by_tjoints(const Vec3i &vertices, const Vec3i &neighbors, std::vector<stl_triangle_vertex_indices> &out_triangles) const;
+
+    void get_seed_fill_contour_recursive(int facet_idx, const Vec3i &neighbors, const Vec3i &neighbors_propagated, std::vector<Vec2i> &edges_out) const;
+
+    int m_free_triangles_head { -1 };
+    int m_free_vertices_head { -1 };
 };
 
 

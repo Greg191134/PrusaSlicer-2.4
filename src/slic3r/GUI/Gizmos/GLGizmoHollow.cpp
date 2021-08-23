@@ -61,7 +61,7 @@ void GLGizmoHollow::set_sla_support_data(ModelObject*, const Selection&)
 
 
 
-void GLGizmoHollow::on_render() const
+void GLGizmoHollow::on_render()
 {
     const Selection& selection = m_parent.get_selection();
     const CommonGizmosDataObjects::SelectionInfo* sel_info = m_c->selection_info();
@@ -88,12 +88,12 @@ void GLGizmoHollow::on_render() const
 }
 
 
-void GLGizmoHollow::on_render_for_picking() const
+void GLGizmoHollow::on_render_for_picking()
 {
     const Selection& selection = m_parent.get_selection();
-#if ENABLE_RENDER_PICKING_PASS
-    m_z_shift = selection.get_volume(*selection.get_volume_idxs().begin())->get_sla_shift_z();
-#endif
+//#if ENABLE_RENDER_PICKING_PASS
+//    m_z_shift = selection.get_volume(*selection.get_volume_idxs().begin())->get_sla_shift_z();
+//#endif
 
     glsafe(::glEnable(GL_DEPTH_TEST));
     render_points(selection, true);
@@ -118,8 +118,7 @@ void GLGizmoHollow::render_points(const Selection& selection, bool picking) cons
     const sla::DrainHoles& drain_holes = m_c->selection_info()->model_object()->sla_drain_holes;
     size_t cache_size = drain_holes.size();
 
-    for (size_t i = 0; i < cache_size; ++i)
-    {
+    for (size_t i = 0; i < cache_size; ++i) {
         const sla::DrainHole& drain_hole = drain_holes[i];
         const bool& point_selected = m_selected[i];
 
@@ -129,13 +128,13 @@ void GLGizmoHollow::render_points(const Selection& selection, bool picking) cons
         // First decide about the color of the point.
         if (picking) {
             std::array<float, 4> color = picking_color_component(i);
-
             render_color = color;
         }
         else {
             if (size_t(m_hover_id) == i) {
                 render_color = {0.f, 1.f, 1.f, 1.f};
-            } else if (m_c->hollowed_mesh() &&
+            }
+            else if (m_c->hollowed_mesh() &&
                        i < m_c->hollowed_mesh()->get_drainholes().size() &&
                        m_c->hollowed_mesh()->get_drainholes()[i].failed) {
                 render_color = {1.f, 0.f, 0.f, .5f};
@@ -149,14 +148,7 @@ void GLGizmoHollow::render_points(const Selection& selection, bool picking) cons
             }
         }
 
-        if (shader && ! picking)
-#if ENABLE_SEQUENTIAL_LIMITS
-            const_cast<GLModel*>(&m_vbo_cylinder)->set_color(-1 , render_color);
-#else
-            shader->set_uniform("uniform_color", render_color);
-#endif // ENABLE_SEQUENTIAL_LIMITS
-        else // picking
-            glsafe(::glColor4fv(render_color.data()));
+        const_cast<GLModel*>(&m_vbo_cylinder)->set_color(-1, render_color);
 
         // Inverse matrix of the instance scaling is applied so that the mark does not scale with the object.
         glsafe(::glPushMatrix());
@@ -553,7 +545,7 @@ RENDER_AGAIN:
     m_imgui->text(m_desc.at("offset"));
     ImGui::SameLine(settings_sliders_left);
     ImGui::PushItemWidth(window_width - settings_sliders_left);
-    ImGui::SliderFloat("   ", &offset, offset_min, offset_max, "%.1f mm");
+    m_imgui->slider_float("   ", &offset, offset_min, offset_max, "%.1f mm");
     if (ImGui::IsItemHovered()) {
         ImGui::BeginTooltip();
         ImGui::PushTextWrapPos(max_tooltip_width);
@@ -568,7 +560,7 @@ RENDER_AGAIN:
     if (current_mode >= quality_mode) {
         m_imgui->text(m_desc.at("quality"));
         ImGui::SameLine(settings_sliders_left);
-        ImGui::SliderFloat("    ", &quality, quality_min, quality_max, "%.1f");
+        m_imgui->slider_float("    ", &quality, quality_min, quality_max, "%.1f");
         if (ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
             ImGui::PushTextWrapPos(max_tooltip_width);
@@ -584,7 +576,7 @@ RENDER_AGAIN:
     if (current_mode >= closing_d_mode) {
         m_imgui->text(m_desc.at("closing_distance"));
         ImGui::SameLine(settings_sliders_left);
-        ImGui::SliderFloat("      ", &closing_d, closing_d_min, closing_d_max, "%.1f mm");
+        m_imgui->slider_float("      ", &closing_d, closing_d_min, closing_d_max, "%.1f mm");
         if (ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
             ImGui::PushTextWrapPos(max_tooltip_width);
@@ -626,15 +618,19 @@ RENDER_AGAIN:
 
     ImGui::Separator();
 
-    float diameter_upper_cap = 15.;
-    if (m_new_hole_radius > diameter_upper_cap)
-        m_new_hole_radius = diameter_upper_cap;
+    float diameter_upper_cap = 60.;
+    if (m_new_hole_radius * 2.f > diameter_upper_cap)
+        m_new_hole_radius = diameter_upper_cap / 2.f;
     m_imgui->text(m_desc.at("hole_diameter"));
     ImGui::SameLine(diameter_slider_left);
     ImGui::PushItemWidth(window_width - diameter_slider_left);
 
     float diam = 2.f * m_new_hole_radius;
-    ImGui::SliderFloat("", &diam, 1.f, diameter_upper_cap, "%.1f mm");
+    m_imgui->slider_float("", &diam, 1.f, 15.f, "%.1f mm", 1.f, false);
+    // Let's clamp the value (which could have been entered by keyboard) to a larger range
+    // than the slider. This allows entering off-scale values and still protects against
+    //complete non-sense.
+    diam = std::clamp(diam, 0.1f, diameter_upper_cap);
     m_new_hole_radius = diam / 2.f;
     bool clicked = ImGui::IsItemClicked();
     bool edited = ImGui::IsItemEdited();
@@ -642,7 +638,9 @@ RENDER_AGAIN:
 
     m_imgui->text(m_desc["hole_depth"]);
     ImGui::SameLine(diameter_slider_left);
-    ImGui::SliderFloat("  ", &m_new_hole_height, 0.f, 10.f, "%.1f mm");
+    m_imgui->slider_float("  ", &m_new_hole_height, 0.f, 10.f, "%.1f mm", 1.f, false);
+    // Same as above:
+    m_new_hole_height = std::clamp(m_new_hole_height, 0.f, 100.f);
 
     clicked |= ImGui::IsItemClicked();
     edited |= ImGui::IsItemEdited();
@@ -707,7 +705,7 @@ RENDER_AGAIN:
     ImGui::SameLine(clipping_slider_left);
     ImGui::PushItemWidth(window_width - clipping_slider_left);
     float clp_dist = m_c->object_clipper()->get_position();
-    if (ImGui::SliderFloat("     ", &clp_dist, 0.f, 1.f, "%.2f"))
+    if (m_imgui->slider_float("     ", &clp_dist, 0.f, 1.f, "%.2f"))
         m_c->object_clipper()->set_position(clp_dist, true);
 
     // make sure supports are shown/hidden as appropriate

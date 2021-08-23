@@ -49,7 +49,7 @@
 #include "libslic3r/Format/SL1.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Thread.hpp"
-#include "libslic3r/LibraryCheck.hpp"
+#include "libslic3r/BlacklistedLibraryCheck.hpp"
 
 #include "PrusaSlicer.hpp"
 
@@ -118,7 +118,8 @@ int CLI::run(int argc, char **argv)
             boost::algorithm::iends_with(boost::filesystem::path(argv[0]).filename().string(), "gcodeviewer");
 #endif // _WIN32
 
-    const std::vector<std::string> &load_configs		= m_config.option<ConfigOptionStrings>("load", true)->values;
+    const std::vector<std::string>              &load_configs		      = m_config.option<ConfigOptionStrings>("load", true)->values;
+    const ForwardCompatibilitySubstitutionRule   config_substitution_rule = m_config.option<ConfigOptionEnum<ForwardCompatibilitySubstitutionRule>>("config_compatibility", true)->value;
 
     // load config files supplied via --load
     for (auto const &file : load_configs) {
@@ -130,12 +131,18 @@ int CLI::run(int argc, char **argv)
                 return 1;
             }
         }
-        DynamicPrintConfig config;
+        DynamicPrintConfig  config;
+        ConfigSubstitutions config_substitutions;
         try {
-            config.load(file);
+            config_substitutions = config.load(file, config_substitution_rule);
         } catch (std::exception &ex) {
-            boost::nowide::cerr << "Error while reading config file: " << ex.what() << std::endl;
+            boost::nowide::cerr << "Error while reading config file \"" << file << "\": " << ex.what() << std::endl;
             return 1;
+        }
+        if (! config_substitutions.empty()) {
+            boost::nowide::cout << "The following configuration values were substituted when loading \" << file << \":\n";
+            for (const ConfigSubstitution &subst : config_substitutions)
+                boost::nowide::cout << "\tkey = \"" << subst.opt_def->opt_key << "\"\t loaded = \"" << subst.old_value << "\tsubstituted = \"" << subst.new_value->serialize() << "\"\n";
         }
         config.normalize_fdm();
         PrinterTechnology other_printer_technology = get_printer_technology(config);
@@ -174,7 +181,9 @@ int CLI::run(int argc, char **argv)
             try {
                 // When loading an AMF or 3MF, config is imported as well, including the printer technology.
                 DynamicPrintConfig config;
-                model = Model::read_from_file(file, &config, true);
+                ConfigSubstitutionContext config_substitutions(config_substitution_rule);
+                //FIXME should we check the version here? // | Model::LoadAttribute::CheckVersion ?
+                model = Model::read_from_file(file, &config, &config_substitutions, Model::LoadAttribute::AddDefaultInstances);
                 PrinterTechnology other_printer_technology = get_printer_technology(config);
                 if (printer_technology == ptUnknown) {
                     printer_technology = other_printer_technology;
@@ -182,6 +191,11 @@ int CLI::run(int argc, char **argv)
                 else if (printer_technology != other_printer_technology && other_printer_technology != ptUnknown) {
                     boost::nowide::cerr << "Mixing configurations for FFF and SLA technologies" << std::endl;
                     return 1;
+                }
+                if (! config_substitutions.substitutions.empty()) {
+                    boost::nowide::cout << "The following configuration values were substituted when loading \" << file << \":\n";
+                    for (const ConfigSubstitution& subst : config_substitutions.substitutions)
+                        boost::nowide::cout << "\tkey = \"" << subst.opt_def->opt_key << "\"\t loaded = \"" << subst.old_value << "\tsubstituted = \"" << subst.new_value->serialize() << "\"\n";
                 }
                 // config is applied to m_print_config before the current m_config values.
                 config += std::move(m_print_config);
@@ -316,6 +330,8 @@ int CLI::run(int argc, char **argv)
             }
         } else if (opt_key == "dont_arrange") {
             // do nothing - this option alters other transform options
+        } else if (opt_key == "ensure_on_bed") {
+            // do nothing, the value is used later
         } else if (opt_key == "rotate") {
             for (auto &model : m_models)
                 for (auto &o : model.objects)
@@ -362,7 +378,7 @@ int CLI::run(int argc, char **argv)
                         o->cut(Z, m_config.opt_float("cut"), &out);
                     }
 #else
-                    model.objects.front()->cut(0, m_config.opt_float("cut"), true, true, true);
+                    model.objects.front()->cut(0, m_config.opt_float("cut"), ModelObjectCutAttribute::KeepLower | ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::FlipLower);
 #endif
                     model.delete_object(size_t(0));
                 }
@@ -417,6 +433,13 @@ int CLI::run(int argc, char **argv)
             return 1;
         }
     }
+
+    // All transforms have been dealt with. Now ensure that the objects are on bed.
+    // (Unless the user said otherwise.)
+    if (m_config.opt_bool("ensure_on_bed"))
+        for (auto &model : m_models)
+            for (auto &o : model.objects)
+                o->ensure_on_bed();
 
     // loop through action options
     for (auto const &opt_key : m_actions) {
@@ -608,13 +631,18 @@ bool CLI::setup(int argc, char **argv)
     detect_platform();
 
 #ifdef WIN32
-    // Notify user if blacklisted library is already loaded (Nahimic)
-    // If there are cases of no reports with blacklisted lib - this check should be performed later.
-    // Some libraries are loaded when we load libraries during startup.
-    if (LibraryCheck::get_instance().perform_check()) { 
-        std::wstring text = L"Following libraries has been detected inside of the PrusaSlicer process."
-        L" We suggest stopping or uninstalling these services if you experience crashes or unexpected behaviour while using PrusaSlicer.\n\n";
-        text += LibraryCheck::get_instance().get_blacklisted_string();
+    // Notify user that a blacklisted DLL was injected into PrusaSlicer process (for example Nahimic, see GH #5573).
+    // We hope that if a DLL is being injected into a PrusaSlicer process, it happens at the very start of the application,
+    // thus we shall detect them now.
+    if (BlacklistedLibraryCheck::get_instance().perform_check()) {
+        std::wstring text = L"Following DLLs have been injected into the PrusaSlicer process:\n\n";
+        text += BlacklistedLibraryCheck::get_instance().get_blacklisted_string();
+        text += L"\n\n"
+                L"PrusaSlicer is known to not run correctly with these DLLs injected. "
+                L"We suggest stopping or uninstalling these services if you experience "
+                L"crashes or unexpected behaviour while using PrusaSlicer.\n"
+                L"For example, ASUS Sonic Studio injects a Nahimic driver, which makes PrusaSlicer "
+                L"to crash on a secondary monitor, see PrusaSlicer github issue #5573";
         MessageBoxW(NULL, text.c_str(), L"Warning"/*L"Incopatible library found"*/, MB_OK);
     }
 #endif
@@ -647,6 +675,7 @@ bool CLI::setup(int argc, char **argv)
     set_resources_dir(path_resources.string());
     set_var_dir((path_resources / "icons").string());
     set_local_dir((path_resources / "localization").string());
+    set_sys_shapes_dir((path_resources / "shapes").string());
 
     // Parse all command line options into a DynamicConfig.
     // If any option is unsupported, print usage and abort immediately.

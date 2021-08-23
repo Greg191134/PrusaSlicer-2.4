@@ -174,7 +174,16 @@ public:
     
 private:
 	void 	thread_proc();
-	void 	thread_proc_safe();
+	// Calls thread_proc(), catches all C++ exceptions and shows them using wxApp::OnUnhandledException().
+	void 	thread_proc_safe() throw();
+#ifdef _WIN32
+	// Wrapper for Win32 structured exceptions. Win32 structured exception blocks and C++ exception blocks cannot be mixed in the same function.
+	// Catch a SEH exception and return its ID or zero if no SEH exception has been catched.
+	unsigned long 	thread_proc_safe_seh() throw();
+	// Calls thread_proc_safe_seh(), rethrows a Slic3r::HardCrash exception based on SEH exception
+	// returned by thread_proc_safe_seh() and lets wxApp::OnUnhandledException() display it.
+	void 			thread_proc_safe_seh_throw() throw();
+#endif // _WIN32
 	void 	join_background_thread();
 	// To be called by Print::apply() through the Print::m_cancel_callback to stop the background
 	// processing before changing any data of running or finalized milestones.
@@ -187,15 +196,29 @@ private:
     // Temporary: for mimicking the fff file export behavior with the raster output
     void	process_sla();
 
+    // Call Print::process() and catch all exceptions into ex, thus no exception could be thrown
+    // by this method. This exception behavior is required to combine C++ exceptions with Win32 SEH exceptions
+    // on the same thread.
+	void    call_process(std::exception_ptr &ex) throw();
+
+#ifdef _WIN32
+	// Wrapper for Win32 structured exceptions. Win32 structured exception blocks and C++ exception blocks cannot be mixed in the same function.
+	// Catch a SEH exception and return its ID or zero if no SEH exception has been catched.
+	unsigned long call_process_seh(std::exception_ptr &ex) throw();
+	// Calls call_process_seh(), rethrows a Slic3r::HardCrash exception based on SEH exception
+	// returned by call_process_seh().
+	void    	  call_process_seh_throw(std::exception_ptr &ex) throw();
+#endif // _WIN32
+
 	// Currently active print. It is one of m_fff_print and m_sla_print.
 	PrintBase				   *m_print 			 = nullptr;
 	// Non-owned pointers to Print instances.
 	Print 					   *m_fff_print 		 = nullptr;
 	SLAPrint 				   *m_sla_print			 = nullptr;
 	// Data structure, to which the G-code export writes its annotations.
-	GCodeProcessor::Result     *m_gcode_result = nullptr;
+	GCodeProcessor::Result     *m_gcode_result 		 = nullptr;
 	// Callback function, used to write thumbnails into gcode.
-	ThumbnailsGeneratorCallback m_thumbnail_cb = nullptr;
+	ThumbnailsGeneratorCallback m_thumbnail_cb 	     = nullptr;
 	SL1Archive                  m_sla_archive;
 		// Temporary G-code, there is one defined for the BackgroundSlicingProcess, differentiated from the other processes by a process ID.
 	std::string 				m_temp_output_path;
@@ -232,7 +255,6 @@ private:
     std::shared_ptr<UITask> 	m_ui_task;
 
     PrintState<BackgroundSlicingProcessStep, bspsCount>   	m_step_state;
-    mutable tbb::mutex                      				m_step_state_mutex;
 	bool                set_step_started(BackgroundSlicingProcessStep step);
 	void                set_step_done(BackgroundSlicingProcessStep step);
 	bool 				is_step_done(BackgroundSlicingProcessStep step) const;
@@ -240,6 +262,7 @@ private:
     bool                invalidate_all_steps();
     // If the background processing stop was requested, throw CanceledException.
     void                throw_if_canceled() const { if (m_print->canceled()) throw CanceledException(); }
+	void				finalize_gcode();
     void                prepare_upload();
     // To be executed at the background thread.
 	ThumbnailsList		render_thumbnails(const ThumbnailsParams &params);

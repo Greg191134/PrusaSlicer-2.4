@@ -16,6 +16,13 @@ namespace Slic3r::GUI {
 
 
 
+void GLGizmoSeam::on_shutdown()
+{
+    m_parent.toggle_model_objects_visibility(true);
+}
+
+
+
 bool GLGizmoSeam::on_init()
 {
     m_shortcut_key = WXK_CONTROL_P;
@@ -56,6 +63,7 @@ void GLGizmoSeam::render_painter_gizmo() const
     render_triangles(selection);
 
     m_c->object_clipper()->render_cut();
+    m_c->instances_hider()->render_cut();
     render_cursor();
 
     glsafe(::glDisable(GL_BLEND));
@@ -86,10 +94,10 @@ void GLGizmoSeam::on_render_input_window(float x, float y, float bottom_limit)
     const float button_width = m_imgui->calc_text_size(m_desc.at("remove_all")).x + m_imgui->scaled(1.f);
     const float minimal_slider_width = m_imgui->scaled(4.f);
 
-    float caption_max = 0.f;
-    float total_text_max = 0.;
-    for (const std::string& t : {"enforce", "block", "remove"}) {
-        caption_max = std::max(caption_max, m_imgui->calc_text_size(m_desc.at(t+"_caption")).x);
+    float caption_max    = 0.f;
+    float total_text_max = 0.f;
+    for (const auto &t : std::array<std::string, 3>{"enforce", "block", "remove"}) {
+        caption_max    = std::max(caption_max, m_imgui->calc_text_size(m_desc.at(t + "_caption")).x);
         total_text_max = std::max(total_text_max, caption_max + m_imgui->calc_text_size(m_desc.at(t)).x);
     }
     caption_max += m_imgui->scaled(1.f);
@@ -107,7 +115,7 @@ void GLGizmoSeam::on_render_input_window(float x, float y, float bottom_limit)
         m_imgui->text(text);
     };
 
-    for (const std::string& t : {"enforce", "block", "remove"})
+    for (const auto &t : std::array<std::string, 3>{"enforce", "block", "remove"})
         draw_text_with_caption(m_desc.at(t + "_caption"), m_desc.at(t));
 
     m_imgui->text("");
@@ -120,6 +128,7 @@ void GLGizmoSeam::on_render_input_window(float x, float y, float bottom_limit)
             if (mv->is_model_part()) {
                 ++idx;
                 m_triangle_selectors[idx]->reset();
+                m_triangle_selectors[idx]->request_update_render_data();
             }
         }
 
@@ -132,7 +141,7 @@ void GLGizmoSeam::on_render_input_window(float x, float y, float bottom_limit)
     m_imgui->text(m_desc.at("cursor_size"));
     ImGui::SameLine(cursor_size_slider_left);
     ImGui::PushItemWidth(window_width - cursor_size_slider_left);
-    ImGui::SliderFloat(" ", &m_cursor_radius, CursorRadiusMin, CursorRadiusMax, "%.2f");
+    m_imgui->slider_float(" ", &m_cursor_radius, CursorRadiusMin, CursorRadiusMax, "%.2f");
     if (ImGui::IsItemHovered()) {
         ImGui::BeginTooltip();
         ImGui::PushTextWrapPos(max_tooltip_width);
@@ -140,7 +149,6 @@ void GLGizmoSeam::on_render_input_window(float x, float y, float bottom_limit)
         ImGui::PopTextWrapPos();
         ImGui::EndTooltip();
     }
-
 
     ImGui::AlignTextToFramePadding();
     m_imgui->text(m_desc.at("cursor_type"));
@@ -193,7 +201,7 @@ void GLGizmoSeam::on_render_input_window(float x, float y, float bottom_limit)
     ImGui::SameLine(clipping_slider_left);
     ImGui::PushItemWidth(window_width - clipping_slider_left);
     auto clp_dist = float(m_c->object_clipper()->get_position());
-    if (ImGui::SliderFloat("  ", &clp_dist, 0.f, 1.f, "%.2f"))
+    if (m_imgui->slider_float("  ", &clp_dist, 0.f, 1.f, "%.2f"))
         m_c->object_clipper()->set_position(clp_dist, true);
 
     if (ImGui::IsItemHovered()) {
@@ -249,7 +257,9 @@ void GLGizmoSeam::update_from_model_object()
         const TriangleMesh* mesh = &mv->mesh();
 
         m_triangle_selectors.emplace_back(std::make_unique<TriangleSelectorGUI>(*mesh));
-        m_triangle_selectors.back()->deserialize(mv->seam_facets.get_data());
+        // Reset of TriangleSelector is done inside TriangleSelectorGUI's constructor, so we don't need it to perform it again in deserialize().
+        m_triangle_selectors.back()->deserialize(mv->seam_facets.get_data(), false);
+        m_triangle_selectors.back()->request_update_render_data();
     }
 }
 

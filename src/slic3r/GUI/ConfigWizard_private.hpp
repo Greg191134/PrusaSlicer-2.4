@@ -512,14 +512,11 @@ private:
     ScalableBitmap bullet_black;
     ScalableBitmap bullet_blue;
     ScalableBitmap bullet_white;
-    wxStaticBitmap* logo;
 
     std::vector<Item> items;
     size_t item_active;
     ssize_t item_hover;
     size_t last_page;
-
-    int logo_height;
 
     int item_height() const { return std::max(bullet_black.bmp().GetSize().GetHeight(), em_w) + em_w; }
 
@@ -614,7 +611,7 @@ struct ConfigWizard::priv
 
     bool on_bnt_finish();
     bool check_and_install_missing_materials(Technology technology, const std::string &only_for_model_id = std::string());
-    void apply_config(AppConfig *app_config, PresetBundle *preset_bundle, const PresetUpdater *updater);
+    bool apply_config(AppConfig *app_config, PresetBundle *preset_bundle, const PresetUpdater *updater);
     // #ys_FIXME_alise
     void update_presets_in_config(const std::string& section, const std::string& alias_key, bool add);
 #ifdef __linux__

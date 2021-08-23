@@ -9,6 +9,7 @@
 
 #include "Selection.hpp"
 
+#include "libslic3r/enum_bitmask.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -24,6 +25,8 @@ namespace Slic3r {
 
 class Model;
 class ModelObject;
+enum class ModelObjectCutAttribute : int;
+using ModelObjectCutAttributes = enum_bitmask<ModelObjectCutAttribute>;
 class ModelInstance;
 class Print;
 class SLAPrint;
@@ -80,6 +83,7 @@ public:
     void sys_color_changed();
     void search();
     void jump_to_option(size_t selected);
+    void jump_to_option(const std::string& opt_key, Preset::Type type, const std::wstring& category);
 
     ObjectManipulation*     obj_manipul();
     ObjectList*             obj_list();
@@ -109,6 +113,10 @@ public:
     void                    update_searcher();
     void                    update_ui_from_settings();
 
+#ifdef _MSW_DARK_MODE
+    void                    show_mode_sizer(bool show);
+#endif
+
     std::vector<PlaterPresetComboBox*>&   combos_filament();
     Search::OptionsSearcher&        get_searcher();
     std::string&                    get_search_line();
@@ -130,18 +138,17 @@ public:
     Plater &operator=(const Plater &) = delete;
     ~Plater() = default;
 
-#if ENABLE_PROJECT_DIRTY_STATE
     bool is_project_dirty() const;
     void update_project_dirty_from_presets();
-    bool save_project_if_dirty();
+    int  save_project_if_dirty();
     void reset_project_dirty_after_save();
     void reset_project_dirty_initial_presets();
 #if ENABLE_PROJECT_DIRTY_STATE_DEBUG_WINDOW
     void render_project_state_debug_window() const;
 #endif // ENABLE_PROJECT_DIRTY_STATE_DEBUG_WINDOW
-#endif // ENABLE_PROJECT_DIRTY_STATE
 
     Sidebar& sidebar();
+    const Model& model() const;
     Model& model();
     const Print& fff_print() const;
     Print& fff_print();
@@ -204,17 +211,14 @@ public:
     void convert_unit(ConversionType conv_type);
     void toggle_layers_editing(bool enable);
 
-    void cut(size_t obj_idx, size_t instance_idx, coordf_t z, bool keep_upper = true, bool keep_lower = true, bool rotate_lower = false);
+    void cut(size_t obj_idx, size_t instance_idx, coordf_t z, ModelObjectCutAttributes attributes);
 
     void export_gcode(bool prefer_removable);
     void export_stl(bool extended = false, bool selection_only = false);
     void export_amf();
-#if ENABLE_PROJECT_DIRTY_STATE
     bool export_3mf(const boost::filesystem::path& output_path = boost::filesystem::path());
-#else
-    void export_3mf(const boost::filesystem::path& output_path = boost::filesystem::path());
-#endif // ENABLE_PROJECT_DIRTY_STATE
     void reload_from_disk();
+    void replace_with_stl();
     void reload_all_from_disk();
     bool has_toolpaths_to_export() const;
     void export_toolpaths_to_obj() const;
@@ -222,6 +226,10 @@ public:
     void reslice_SLA_supports(const ModelObject &object, bool postpone_error_messages = false);
     void reslice_SLA_hollowing(const ModelObject &object, bool postpone_error_messages = false);
     void reslice_SLA_until_step(SLAPrintObjectStep step, const ModelObject &object, bool postpone_error_messages = false);
+
+    void clear_before_change_mesh(int obj_idx);
+    void changed_mesh(int obj_idx);
+
     void changed_object(int obj_idx);
     void changed_objects(const std::vector<size_t>& object_idxs);
     void schedule_background_process(bool schedule = true);
@@ -243,9 +251,7 @@ public:
     // For the memory statistics. 
     const Slic3r::UndoRedo::Stack& undo_redo_stack_main() const;
     void clear_undo_redo_stack_main();
-#if ENABLE_PROJECT_DIRTY_STATE
     const Slic3r::UndoRedo::Stack& undo_redo_stack_active() const;
-#endif // ENABLE_PROJECT_DIRTY_STATE
     // Enter / leave the Gizmos specific Undo / Redo stack. To be used by the SLA support point editing gizmo.
     void enter_gizmos_stack();
     void leave_gizmos_stack();
@@ -260,7 +266,7 @@ public:
     std::vector<std::string> get_extruder_colors_from_plater_config(const GCodeProcessor::Result* const result = nullptr) const;
     std::vector<std::string> get_colors_for_color_print(const GCodeProcessor::Result* const result = nullptr) const;
 
-    void update_object_menu();
+    void update_menus();
     void show_action_buttons(const bool is_ready_to_slice) const;
 
     wxString get_project_filename(const wxString& extension = wxEmptyString) const;
@@ -276,10 +282,8 @@ public:
     GLCanvas3D* get_current_canvas3D();
     BoundingBoxf bed_shape_bb() const;
     
-#if ENABLE_GCODE_WINDOW
     void start_mapping_gcode_window();
     void stop_mapping_gcode_window();
-#endif // ENABLE_GCODE_WINDOW
 
     void arrange();
     void find_new_position(const ModelInstancePtrs  &instances);
@@ -306,6 +310,7 @@ public:
     bool can_decrease_instances() const;
     bool can_set_instance_to_object() const;
     bool can_fix_through_netfabb() const;
+    bool can_simplify() const;
     bool can_split_to_objects() const;
     bool can_split_to_volumes() const;
     bool can_arrange() const;
@@ -315,6 +320,7 @@ public:
     bool can_undo() const;
     bool can_redo() const;
     bool can_reload_from_disk() const;
+    bool can_replace_with_stl() const;
     bool can_mirror() const;
     bool can_split(bool to_objects) const;
 
@@ -396,10 +402,8 @@ public:
 
     bool inside_snapshot_capture();
 
-#if ENABLE_RENDER_STATISTICS
     void toggle_render_statistic_dialog();
     bool is_render_statistic_dialog_visible() const;
-#endif // ENABLE_RENDER_STATISTICS
 
 	// Wrapper around wxWindow::PopupMenu to suppress error messages popping out while tracking the popup menu.
 	bool PopupMenu(wxMenu *menu, const wxPoint& pos = wxDefaultPosition);

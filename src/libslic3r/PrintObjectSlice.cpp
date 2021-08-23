@@ -39,16 +39,6 @@ LayerPtrs new_layers(
     return out;
 }
 
-template<typename LayerContainer>
-static inline std::vector<float> zs_from_layers(const LayerContainer &layers)
-{
-    std::vector<float> zs;
-    zs.reserve(layers.size());
-    for (const Layer *l : layers)
-        zs.emplace_back((float)l->slice_z);
-    return zs;
-}
-
 //FIXME The admesh repair function may break the face connectivity, rather refresh it here as the slicing code relies on it.
 // This function will go away once we get rid of admesh from ModelVolume.
 static indexed_triangle_set get_mesh_its_fix_mesh_connectivity(TriangleMesh mesh)
@@ -177,7 +167,9 @@ static std::vector<VolumeSlices> slice_volumes_inner(
 
     params_base.mode_below     = params_base.mode;
 
-    const auto extra_offset = std::max(0.f, float(print_object_config.xy_size_compensation.value));
+    const size_t num_extruders = print_config.nozzle_diameter.size();
+    const bool   is_mm_painted = num_extruders > 1 && std::any_of(model_volumes.cbegin(), model_volumes.cend(), [](const ModelVolume *mv) { return mv->is_mm_painted(); });
+    const auto   extra_offset  = is_mm_painted ? 0.f : std::max(0.f, float(print_object_config.xy_size_compensation.value));
 
     for (const ModelVolume *model_volume : model_volumes)
         if (model_volume_needs_slicing(*model_volume)) {
@@ -604,14 +596,18 @@ static inline void apply_mm_segmentation(PrintObject &print_object, ThrowOnCance
                 if (! layer_split)
                     continue;
                 // Split LayerRegions by by_extruder regions.
+                // layer_range.painted_regions are sorted by extruder ID and parent PrintObject region ID.
                 auto it_painted_region = layer_range.painted_regions.begin();
                 for (int region_id = 0; region_id < int(layer->region_count()); ++ region_id)
                     if (LayerRegion &layerm = *layer->get_region(region_id); ! layerm.slices.surfaces.empty()) {
+                        assert(layerm.region().print_object_region_id() == region_id);
                         const BoundingBox bbox = get_extents(layerm.slices.surfaces);
                         assert(it_painted_region < layer_range.painted_regions.end());
+                        // Find the first it_painted_region which overrides this region.
                         for (; layer_range.volume_regions[it_painted_region->parent].region->print_object_region_id() < region_id; ++ it_painted_region)
-                            assert(it_painted_region < layer_range.painted_regions.end());
-                        assert(&layerm.region() == it_painted_region->region && layerm.region().print_object_region_id() == region_id);
+                            assert(it_painted_region != layer_range.painted_regions.end());
+                        assert(it_painted_region != layer_range.painted_regions.end());
+                        assert(layer_range.volume_regions[it_painted_region->parent].region == &layerm.region());
                         // 1-based extruder ID
                         bool   self_trimmed = false;
                         int    self_extruder_id = -1;
@@ -619,7 +615,7 @@ static inline void apply_mm_segmentation(PrintObject &print_object, ThrowOnCance
                             if (ByExtruder &segmented = by_extruder[extruder_id - 1]; segmented.bbox.defined && bbox.overlap(segmented.bbox)) {
                                 // Find the target region.
                                 for (; int(it_painted_region->extruder_id) < extruder_id; ++ it_painted_region)
-                                    assert(it_painted_region < layer_range.painted_regions.end());
+                                    assert(it_painted_region != layer_range.painted_regions.end());
                                 assert(layer_range.volume_regions[it_painted_region->parent].region == &layerm.region() && int(it_painted_region->extruder_id) == extruder_id);
                                 //FIXME Don't trim by self, it is not reliable.
                                 if (&layerm.region() == it_painted_region->region) {
@@ -669,7 +665,7 @@ static inline void apply_mm_segmentation(PrintObject &print_object, ThrowOnCance
                     ByRegion &src = by_region[region_id];
                     if (src.needs_merge)
                         // Multiple regions were merged into one.
-                        src.expolygons = offset2_ex(src.expolygons, float(scale_(EPSILON)), - float(scale_(EPSILON)));
+                        src.expolygons = offset2_ex(src.expolygons, float(scale_(10 * EPSILON)), - float(scale_(10 * EPSILON)));
                     layer->get_region(region_id)->slices.set(std::move(src.expolygons), stInternal);
                 }
             }
@@ -700,11 +696,9 @@ void PrintObject::slice_volumes()
     }
 
     std::vector<float>                   slice_zs      = zs_from_layers(m_layers);
-    Transform3d                          trafo         = this->trafo();
-    trafo.pretranslate(Vec3d(- unscale<float>(m_center_offset.x()), - unscale<float>(m_center_offset.y()), 0));
     std::vector<std::vector<ExPolygons>> region_slices = slices_to_regions(this->model_object()->volumes, *m_shared_regions, slice_zs,
         slice_volumes_inner(
-            print->config(), this->config(), trafo,
+            print->config(), this->config(), this->trafo_centered(),
             this->model_object()->volumes, m_shared_regions->layer_ranges, slice_zs, throw_on_cancel_callback),
         m_config.clip_multipart_objects,
         throw_on_cancel_callback);
@@ -730,7 +724,19 @@ void PrintObject::slice_volumes()
 
     // Is any ModelVolume MMU painted?
     if (const auto& volumes = this->model_object()->volumes;
+        m_print->config().nozzle_diameter.size() > 1 &&
         std::find_if(volumes.begin(), volumes.end(), [](const ModelVolume* v) { return !v->mmu_segmentation_facets.empty(); }) != volumes.end()) {
+
+        // If XY Size compensation is also enabled, notify the user that XY Size compensation
+        // would not be used because the object is multi-material painted.
+        if (m_config.xy_size_compensation.value != 0.f) {
+            this->active_step_add_warning(
+                PrintStateBase::WarningLevel::CRITICAL,
+                L("An object has enabled XY Size compensation which will not be used because it is also multi-material painted.\nXY Size "
+                  "compensation cannot be combined with multi-material painting.") +
+                    "\n" + (L("Object name")) + ": " + this->model_object()->name);
+        }
+
         BOOST_LOG_TRIVIAL(debug) << "Slicing volumes - MMU segmentation";
         apply_mm_segmentation(*this, [print]() { print->throw_if_canceled(); });
     }
@@ -739,8 +745,9 @@ void PrintObject::slice_volumes()
     BOOST_LOG_TRIVIAL(debug) << "Slicing volumes - make_slices in parallel - begin";
     {
         // Compensation value, scaled. Only applying the negative scaling here, as the positive scaling has already been applied during slicing.
-        const auto  xy_compensation_scaled              = scaled<float>(std::min(m_config.xy_size_compensation.value, 0.));
-        const float elephant_foot_compensation_scaled 	= (m_config.raft_layers == 0) ? 
+        const size_t num_extruders = print->config().nozzle_diameter.size();
+        const auto   xy_compensation_scaled            = (num_extruders > 1 && this->is_mm_painted()) ? scaled<float>(0.f) : scaled<float>(std::min(m_config.xy_size_compensation.value, 0.));
+        const float  elephant_foot_compensation_scaled = (m_config.raft_layers == 0) ?
         	// Only enable Elephant foot compensation if printing directly on the print bed.
             float(scale_(m_config.elefant_foot_compensation.value)) :
         	0.f;
@@ -812,12 +819,12 @@ void PrintObject::slice_volumes()
     BOOST_LOG_TRIVIAL(debug) << "Slicing volumes - make_slices in parallel - end";
 }
 
-std::vector<ExPolygons> PrintObject::slice_support_volumes(const ModelVolumeType model_volume_type) const
+std::vector<Polygons> PrintObject::slice_support_volumes(const ModelVolumeType model_volume_type) const
 {
     auto it_volume     = this->model_object()->volumes.begin();
     auto it_volume_end = this->model_object()->volumes.end();
     for (; it_volume != it_volume_end && (*it_volume)->type() != model_volume_type; ++ it_volume) ;
-    std::vector<ExPolygons> slices;
+    std::vector<Polygons> slices;
     if (it_volume != it_volume_end) {
         // Found at least a single support volume of model_volume_type.
         std::vector<float> zs = zs_from_layers(this->layers());
@@ -826,21 +833,22 @@ std::vector<ExPolygons> PrintObject::slice_support_volumes(const ModelVolumeType
         const Print       *print = this->print();
         auto               throw_on_cancel_callback = std::function<void()>([print](){ print->throw_if_canceled(); });
         MeshSlicingParamsEx params;
-        params.trafo = this->trafo();
-        params.trafo.pretranslate(Vec3d(-unscale<float>(m_center_offset.x()), -unscale<float>(m_center_offset.y()), 0));
+        params.trafo = this->trafo_centered();
         for (; it_volume != it_volume_end; ++ it_volume)
             if ((*it_volume)->type() == model_volume_type) {
                 std::vector<ExPolygons> slices2 = slice_volume(*(*it_volume), zs, params, throw_on_cancel_callback);
-                if (slices.empty())
-                    slices = std::move(slices2);
-                else if (! slices2.empty()) {
+                if (slices.empty()) {
+                    slices.reserve(slices2.size());
+                    for (ExPolygons &src : slices2)
+                        slices.emplace_back(to_polygons(std::move(src)));
+                } else if (!slices2.empty()) {
                     if (merge_layers.empty())
                         merge_layers.assign(zs.size(), false);
                     for (size_t i = 0; i < zs.size(); ++ i) {
                         if (slices[i].empty())
-                            slices[i] = std::move(slices2[i]);
+                            slices[i] = to_polygons(std::move(slices2[i]));
                         else if (! slices2[i].empty()) {
-                            append(slices[i], std::move(slices2[i]));
+                            append(slices[i], to_polygons(std::move(slices2[i])));
                             merge_layers[i] = true;
                             merge = true;
                         }
@@ -848,7 +856,7 @@ std::vector<ExPolygons> PrintObject::slice_support_volumes(const ModelVolumeType
                 }
             }
         if (merge) {
-            std::vector<ExPolygons*> to_merge;
+            std::vector<Polygons*> to_merge;
             to_merge.reserve(zs.size());
             for (size_t i = 0; i < zs.size(); ++ i)
                 if (merge_layers[i])
@@ -857,7 +865,7 @@ std::vector<ExPolygons> PrintObject::slice_support_volumes(const ModelVolumeType
                 tbb::blocked_range<size_t>(0, to_merge.size()),
                 [&to_merge](const tbb::blocked_range<size_t> &range) {
                     for (size_t i = range.begin(); i < range.end(); ++ i)
-                        *to_merge[i] = union_ex(*to_merge[i]);
+                        *to_merge[i] = union_(*to_merge[i]);
             });
         }
     }

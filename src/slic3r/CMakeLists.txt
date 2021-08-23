@@ -57,6 +57,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoPainterBase.hpp
     GUI/Gizmos/GLGizmoSeam.cpp
     GUI/Gizmos/GLGizmoSeam.hpp
+    GUI/Gizmos/GLGizmoSimplify.cpp
+    GUI/Gizmos/GLGizmoSimplify.hpp
     GUI/Gizmos/GLGizmoMmuSegmentation.cpp
     GUI/Gizmos/GLGizmoMmuSegmentation.hpp
     GUI/GLSelectionRectangle.cpp
@@ -91,6 +93,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Plater.hpp
     GUI/PresetComboBoxes.hpp
     GUI/PresetComboBoxes.cpp
+    GUI/BitmapComboBox.hpp
+    GUI/BitmapComboBox.cpp
     GUI/SavePresetDialog.hpp
     GUI/SavePresetDialog.cpp
     GUI/PhysicalPrinterDialog.hpp
@@ -99,6 +103,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_Factories.hpp
     GUI/GUI_ObjectList.cpp
     GUI/GUI_ObjectList.hpp
+    GUI/GalleryDialog.cpp
+    GUI/GalleryDialog.hpp
     GUI/GUI_ObjectManipulation.cpp
     GUI/GUI_ObjectManipulation.hpp
     GUI/GUI_ObjectSettings.cpp
@@ -179,6 +185,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Mouse3DController.hpp
     GUI/DoubleSlider.cpp
     GUI/DoubleSlider.hpp
+    GUI/Notebook.cpp
+    GUI/Notebook.hpp
     GUI/ObjectDataViewModel.cpp
     GUI/ObjectDataViewModel.hpp
     GUI/InstanceCheck.cpp
@@ -195,6 +203,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/ProjectDirtyStateManager.cpp
     GUI/DesktopIntegrationDialog.cpp
     GUI/DesktopIntegrationDialog.hpp
+    GUI/HintNotification.cpp
+    GUI/HintNotification.hpp
     Utils/Http.cpp
     Utils/Http.hpp
     Utils/FixModelByWin10.cpp
@@ -258,7 +268,7 @@ if(APPLE)
     target_link_libraries(libslic3r_gui ${DISKARBITRATION_LIBRARY})
 endif()
 
-if (SLIC3R_STATIC AND UNIX AND NOT APPLE)
+if (SLIC3R_STATIC AND NOT SLIC3R_STATIC_EXCLUDE_CURL AND UNIX AND NOT APPLE)
     target_compile_definitions(libslic3r_gui PRIVATE OPENSSL_CERT_OVERRIDE)
 endif ()
 

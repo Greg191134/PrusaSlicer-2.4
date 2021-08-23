@@ -5,9 +5,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Model.hpp"
-#if ENABLE_VALIDATE_CUSTOM_GCODE
 #include "libslic3r/GCode/GCodeProcessor.hpp"
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
 
 #include "slic3r/Utils/Http.hpp"
 #include "slic3r/Utils/PrintHost.hpp"
@@ -43,6 +41,8 @@
 #include "PhysicalPrinterDialog.hpp"
 #include "UnsavedChangesDialog.hpp"
 #include "SavePresetDialog.hpp"
+#include "MsgDialog.hpp"
+#include "Notebook.hpp"
 
 #ifdef WIN32
 	#include <commctrl.h>
@@ -100,11 +100,13 @@ void Tab::Highlighter::blink()
         invalidate();
 }
 
-Tab::Tab(wxNotebook* parent, const wxString& title, Preset::Type type) :
+Tab::Tab(wxBookCtrlBase* parent, const wxString& title, Preset::Type type) :
     m_parent(parent), m_title(title), m_type(type)
 {
     Create(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBK_LEFT | wxTAB_TRAVERSAL/*, name*/);
     this->SetFont(Slic3r::GUI::wxGetApp().normal_font());
+
+    wxGetApp().UpdateDarkUI(this);
 
     m_compatible_printers.type			= Preset::TYPE_PRINTER;
     m_compatible_printers.key_list		= "compatible_printers";
@@ -252,8 +254,11 @@ void Tab::create_preset_tab()
     m_modified_label_clr	= wxGetApp().get_label_clr_modified();
     m_default_text_clr		= wxGetApp().get_label_clr_default();
 
+#ifdef _MSW_DARK_MODE
     // Sizer with buttons for mode changing
-    m_mode_sizer = new ModeSizer(panel);
+    if (wxGetApp().tabs_as_menu())
+#endif
+        m_mode_sizer = new ModeSizer(panel, int (0.5*em_unit(this)));
 
     const float scale_factor = /*wxGetApp().*/em_unit(this)*0.1;// GetContentScaleFactor();
     m_hsizer = new wxBoxSizer(wxHORIZONTAL);
@@ -282,9 +287,11 @@ void Tab::create_preset_tab()
     // m_hsizer->AddStretchSpacer(32);
     // StretchSpacer has a strange behavior under OSX, so
     // There is used just additional sizer for m_mode_sizer with right alignment
-    auto mode_sizer = new wxBoxSizer(wxVERTICAL);
-    mode_sizer->Add(m_mode_sizer, 1, wxALIGN_RIGHT);
-    m_hsizer->Add(mode_sizer, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, wxOSX ? 15 : 10);
+    if (m_mode_sizer) {
+        auto mode_sizer = new wxBoxSizer(wxVERTICAL);
+        mode_sizer->Add(m_mode_sizer, 1, wxALIGN_RIGHT);
+        m_hsizer->Add(mode_sizer, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, wxOSX ? 15 : 10);
+    }
 
     //Horizontal sizer to hold the tree and the selected page.
     m_hsizer = new wxBoxSizer(wxHORIZONTAL);
@@ -305,6 +312,7 @@ void Tab::create_preset_tab()
     m_treectrl->AssignImageList(m_icons);
     m_treectrl->AddRoot("root");
     m_treectrl->SetIndent(0);
+    wxGetApp().UpdateDarkUI(m_treectrl);
 
     // Delay processing of the following handler until the message queue is flushed.
     // This helps to process all the cursor key events on Windows in the tree control,
@@ -483,11 +491,26 @@ void Tab::OnActivate()
     // create controls on active page
     activate_selected_page([](){});
     m_hsizer->Layout();
+
+    // Workaroud for Menu instead of NoteBook
+#ifdef _MSW_DARK_MODE
+//    if (wxGetApp().tabs_as_menu()) 
+    {
+        wxSize sz = m_presets_choice->GetSize(); 
+        wxSize ok_sz = wxSize(35 * m_em_unit, m_presets_choice->GetBestSize().y+1);
+        if (sz != ok_sz) {
+            m_presets_choice->SetMinSize(ok_sz);
+            m_presets_choice->SetSize(ok_sz);
+            GetSizer()->GetItem(size_t(0))->GetSizer()->Layout();
+        }
+    }
+#endif // _MSW_DARK_MODE
     Refresh();
 }
 
 void Tab::update_label_colours()
 {
+    m_default_text_clr = wxGetApp().get_label_clr_default();
     if (m_sys_label_clr == wxGetApp().get_label_clr_sys() && m_modified_label_clr == wxGetApp().get_label_clr_modified())
         return;
     m_sys_label_clr = wxGetApp().get_label_clr_sys();
@@ -684,25 +707,8 @@ void TabPrinter::msw_rescale()
 {
     Tab::msw_rescale();
 
-    // rescale missed options_groups
-    const std::vector<PageShp>& pages = m_printer_technology == ptFFF ? m_pages_sla : m_pages_fff;
-    for (auto page : pages)
-        page->msw_rescale();
-
     if (m_reset_to_filament_color)
         m_reset_to_filament_color->msw_rescale();
-
-    Layout();
-}
-
-void TabPrinter::sys_color_changed() 
-{
-    Tab::sys_color_changed();
-
-    // update missed options_groups
-    const std::vector<PageShp>& pages = m_printer_technology == ptFFF ? m_pages_sla : m_pages_fff;
-    for (auto page : pages)
-        page->sys_color_changed();
 
     Layout();
 }
@@ -925,7 +931,8 @@ void Tab::update_mode()
     m_mode = wxGetApp().get_mode();
 
     // update mode for ModeSizer
-    m_mode_sizer->SetMode(m_mode);
+    if (m_mode_sizer)
+        m_mode_sizer->SetMode(m_mode);
 
     update_visibility();
 
@@ -951,7 +958,8 @@ void Tab::msw_rescale()
 {
     m_em_unit = em_unit(m_parent);
 
-    m_mode_sizer->msw_rescale();
+    if (m_mode_sizer)
+        m_mode_sizer->msw_rescale();
     m_presets_choice->msw_rescale();
 
     m_treectrl->SetMinSize(wxSize(20 * m_em_unit, -1));
@@ -984,14 +992,15 @@ void Tab::msw_rescale()
 
 void Tab::sys_color_changed()
 {
-    update_tab_ui();
-    m_presets_choice->msw_rescale();
+    m_presets_choice->sys_color_changed();
 
     // update buttons and cached bitmaps
     for (const auto btn : m_scaled_buttons)
         btn->msw_rescale();
     for (const auto bmp : m_scaled_bitmaps)
         bmp->msw_rescale();
+    if (m_detach_preset_btn)
+        m_detach_preset_btn->msw_rescale();
 
     // update icons for tree_ctrl
     for (ScalableBitmap& bmp : m_scaled_icons_list)
@@ -1002,15 +1011,21 @@ void Tab::sys_color_changed()
     for (ScalableBitmap& bmp : m_scaled_icons_list)
         m_icons->Add(bmp.bmp());
     m_treectrl->AssignImageList(m_icons);
-#ifdef __WXMSW__
-    m_treectrl->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-#endif
+
     // Colors for ui "decoration"
     update_label_colours();
+#ifdef _WIN32
+    wxWindowUpdateLocker noUpdates(this);
+    if (m_mode_sizer)
+        m_mode_sizer->msw_rescale();
+    wxGetApp().UpdateDarkUI(this);
+    wxGetApp().UpdateDarkUI(m_treectrl);
+#endif
+    update_changed_tree_ui();
 
     // update options_groups
     if (m_active_page)
-        m_active_page->msw_rescale();
+        m_active_page->sys_color_changed();
 
     Layout();
 }
@@ -1155,8 +1170,12 @@ void Tab::activate_option(const std::string& opt_key, const wxString& category)
     wxString page_title = translate_category(category, m_type);
 
     auto cur_item = m_treectrl->GetFirstVisibleItem();
-    if (!cur_item || !m_treectrl->IsVisible(cur_item))
+    if (!cur_item)
         return;
+
+    // We should to activate a tab with searched option, if it doesn't.
+    // And do it before finding of the cur_item to avoid a case when Tab isn't activated jet and all treeItems are invisible
+    wxGetApp().mainframe->select_tab(this);
 
     while (cur_item) {
         auto title = m_treectrl->GetItemText(cur_item);
@@ -1169,8 +1188,6 @@ void Tab::activate_option(const std::string& opt_key, const wxString& category)
         break;
     }
 
-    // we should to activate a tab with searched option, if it doesn't.
-    wxGetApp().mainframe->select_tab(this);
     Field* field = get_field(opt_key);
 
     // focused selected field
@@ -1237,9 +1254,7 @@ void Tab::on_presets_changed()
     // to avoid needless preset loading from update() function
     m_dependent_tabs.clear();
 
-#if ENABLE_PROJECT_DIRTY_STATE
     wxGetApp().plater()->update_project_dirty_from_presets();
-#endif // ENABLE_PROJECT_DIRTY_STATE
 }
 
 void Tab::build_preset_description_line(ConfigOptionsGroup* optgroup)
@@ -1271,7 +1286,8 @@ void Tab::build_preset_description_line(ConfigOptionsGroup* optgroup)
             msg_text += "\n\n";
             msg_text += _(L("This action is not revertible.\nDo you want to proceed?"));
 
-            wxMessageDialog dialog(parent, msg_text, _(L("Detach preset")), wxICON_WARNING | wxYES_NO | wxCANCEL);
+            //wxMessageDialog dialog(parent, msg_text, _(L("Detach preset")), wxICON_WARNING | wxYES_NO | wxCANCEL);
+            MessageDialog dialog(parent, msg_text, _(L("Detach preset")), wxICON_WARNING | wxYES_NO | wxCANCEL);
             if (dialog.ShowModal() == wxID_YES)
                 save_preset(m_presets->get_edited_preset().is_system ? std::string() : m_presets->get_edited_preset().name, true);
         });
@@ -1502,11 +1518,11 @@ void TabPrint::build()
         optgroup->append_single_option_line("support_material_auto", category_path + "auto-generated-supports");
         optgroup->append_single_option_line("support_material_threshold", category_path + "overhang-threshold");
         optgroup->append_single_option_line("support_material_enforce_layers", category_path + "enforce-support-for-the-first");
+        optgroup->append_single_option_line("raft_first_layer_density", category_path + "raft-first-layer-density");
+        optgroup->append_single_option_line("raft_first_layer_expansion", category_path + "raft-first-layer-expansion");
 
         optgroup = page->new_optgroup(L("Raft"));
         optgroup->append_single_option_line("raft_layers", category_path + "raft-layers");
-        optgroup->append_single_option_line("raft_first_layer_density", category_path + "raft-first-layer-density");
-        optgroup->append_single_option_line("raft_first_layer_expansion", category_path + "raft-first-layer-expansion");
         optgroup->append_single_option_line("raft_contact_distance");
         optgroup->append_single_option_line("raft_expansion");
 
@@ -1726,21 +1742,21 @@ void TabPrint::clear_pages()
     m_top_bottom_shell_thickness_explanation = nullptr;
 }
 
-#if ENABLE_VALIDATE_CUSTOM_GCODE
 bool Tab::validate_custom_gcode(const wxString& title, const std::string& gcode)
 {
     std::vector<std::string> tags;
     bool invalid = GCodeProcessor::contains_reserved_tags(gcode, 5, tags);
     if (invalid) {
-        wxString reports = _L_PLURAL("The following line", "The following lines", tags.size());
-        reports += ":\n";
-        for (const std::string& keyword : tags) {
-            reports += ";" + keyword + "\n";
-        }
-        reports += _L("contain reserved keywords.") + "\n";
-        reports += _L("Please remove them, as they may cause problems in g-code visualization and printing time estimation.");
-
-        wxMessageDialog dialog(wxGetApp().mainframe, reports, _L("Found reserved keywords in") + " " + _(title), wxICON_WARNING | wxOK);
+        std::string lines = ":\n";
+        for (const std::string& keyword : tags)
+            lines += ";" + keyword + "\n";
+        wxString reports = format_wxstr(
+            _L_PLURAL("The following line %s contains reserved keywords.\nPlease remove it, as it may cause problems in G-code visualization and printing time estimation.", 
+                      "The following lines %s contain reserved keywords.\nPlease remove them, as they may cause problems in G-code visualization and printing time estimation.", 
+                      tags.size()),
+            lines);
+        //wxMessageDialog dialog(wxGetApp().mainframe, reports, _L("Found reserved keywords in") + " " + _(title), wxICON_WARNING | wxOK);
+        MessageDialog dialog(wxGetApp().mainframe, reports, _L("Found reserved keywords in") + " " + _(title), wxICON_WARNING | wxOK);
         dialog.ShowModal();
     }
     return !invalid;
@@ -1751,7 +1767,6 @@ static void validate_custom_gcode_cb(Tab* tab, ConfigOptionsGroupShp opt_group, 
     tab->update_dirty();
     tab->on_value_change(opt_key, value);
 }
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
 
 void TabFilament::add_filament_overrides_page()
 {
@@ -1952,6 +1967,7 @@ void TabFilament::build()
 
         create_line_with_widget(optgroup.get(), "filament_ramming_parameters", wxEmptyString, [this](wxWindow* parent) {
             auto ramming_dialog_btn = new wxButton(parent, wxID_ANY, _(L("Ramming settings"))+dots, wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+            wxGetApp().UpdateDarkUI(ramming_dialog_btn);
             ramming_dialog_btn->SetFont(Slic3r::GUI::wxGetApp().normal_font());
             ramming_dialog_btn->SetSize(ramming_dialog_btn->GetBestSize());
             auto sizer = new wxBoxSizer(wxHORIZONTAL);
@@ -1976,11 +1992,9 @@ void TabFilament::build()
 
     page = add_options_page(L("Custom G-code"), "cog");
         optgroup = page->new_optgroup(L("Start G-code"), 0);
-#if ENABLE_VALIDATE_CUSTOM_GCODE
         optgroup->m_on_change = [this, optgroup](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup, opt_key, value);
         };
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
         option = optgroup->get_option("start_filament_gcode");
         option.opt.full_width = true;
         option.opt.is_code = true;
@@ -1988,11 +2002,9 @@ void TabFilament::build()
         optgroup->append_single_option_line(option);
 
         optgroup = page->new_optgroup(L("End G-code"), 0);
-#if ENABLE_VALIDATE_CUSTOM_GCODE
         optgroup->m_on_change = [this, optgroup](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup, opt_key, value);
         };
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
         option = optgroup->get_option("end_filament_gcode");
         option.opt.full_width = true;
         option.opt.is_code = true;
@@ -2119,16 +2131,9 @@ wxSizer* Tab::description_line_widget(wxWindow* parent, ogStaticText* *StaticTex
     return sizer;
 }
 
-#if ENABLE_PROJECT_DIRTY_STATE
 bool Tab::saved_preset_is_dirty() const { return m_presets->saved_is_dirty(); }
 void Tab::update_saved_preset_from_current_preset() { m_presets->update_saved_preset_from_current_preset(); }
 bool Tab::current_preset_is_dirty() const { return m_presets->current_is_dirty(); }
-#else
-bool Tab::current_preset_is_dirty()
-{
-    return m_presets->current_is_dirty();
-}
-#endif // ENABLE_PROJECT_DIRTY_STATE
 
 void TabPrinter::build()
 {
@@ -2203,6 +2208,7 @@ void TabPrinter::build_fff()
             def.label = L("Extruders");
             def.tooltip = L("Number of extruders of the printer.");
             def.min = 1;
+            def.max = 256;
             def.mode = comExpert;
         Option option(def, "extruders_count");
         optgroup->append_single_option_line(option);
@@ -2232,7 +2238,8 @@ void TabPrinter::build_fff()
                                     const wxString msg_text = _(L("Single Extruder Multi Material is selected, \n"
                                                                   "and all extruders must have the same diameter.\n"
                                                                   "Do you want to change the diameter for all extruders to first extruder nozzle diameter value?"));
-                                    wxMessageDialog dialog(parent(), msg_text, _(L("Nozzle diameter")), wxICON_WARNING | wxYES_NO);
+                                    //wxMessageDialog dialog(parent(), msg_text, _(L("Nozzle diameter")), wxICON_WARNING | wxYES_NO);
+                                    MessageDialog dialog(parent(), msg_text, _(L("Nozzle diameter")), wxICON_WARNING | wxYES_NO);
 
                                     DynamicPrintConfig new_conf = *m_config;
                                     if (dialog.ShowModal() == wxID_YES) {
@@ -2302,11 +2309,9 @@ void TabPrinter::build_fff()
     const int notes_field_height = 25; // 250
     page = add_options_page(L("Custom G-code"), "cog");
         optgroup = page->new_optgroup(L("Start G-code"), 0);
-#if ENABLE_VALIDATE_CUSTOM_GCODE
         optgroup->m_on_change = [this, optgroup](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup, opt_key, value);
         };
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
         option = optgroup->get_option("start_gcode");
         option.opt.full_width = true;
         option.opt.is_code = true;
@@ -2314,11 +2319,9 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line(option);
 
         optgroup = page->new_optgroup(L("End G-code"), 0);
-#if ENABLE_VALIDATE_CUSTOM_GCODE
         optgroup->m_on_change = [this, optgroup](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup, opt_key, value);
         };
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
         option = optgroup->get_option("end_gcode");
         option.opt.full_width = true;
         option.opt.is_code = true;
@@ -2326,11 +2329,9 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line(option);
 
         optgroup = page->new_optgroup(L("Before layer change G-code"), 0);
-#if ENABLE_VALIDATE_CUSTOM_GCODE
         optgroup->m_on_change = [this, optgroup](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup, opt_key, value);
         };
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
         option = optgroup->get_option("before_layer_gcode");
         option.opt.full_width = true;
         option.opt.is_code = true;
@@ -2338,11 +2339,9 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line(option);
 
         optgroup = page->new_optgroup(L("After layer change G-code"), 0);
-#if ENABLE_VALIDATE_CUSTOM_GCODE
         optgroup->m_on_change = [this, optgroup](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup, opt_key, value);
         };
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
         option = optgroup->get_option("layer_gcode");
         option.opt.full_width = true;
         option.opt.is_code = true;
@@ -2350,11 +2349,9 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line(option);
 
         optgroup = page->new_optgroup(L("Tool change G-code"), 0);
-#if ENABLE_VALIDATE_CUSTOM_GCODE
         optgroup->m_on_change = [this, optgroup](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup, opt_key, value);
         };
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
         option = optgroup->get_option("toolchange_gcode");
         option.opt.full_width = true;
         option.opt.is_code = true;
@@ -2362,11 +2359,9 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line(option);
 
         optgroup = page->new_optgroup(L("Between objects G-code (for sequential printing)"), 0);
-#if ENABLE_VALIDATE_CUSTOM_GCODE
         optgroup->m_on_change = [this, optgroup](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup, opt_key, value);
         };
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
         option = optgroup->get_option("between_objects_gcode");
         option.opt.full_width = true;
         option.opt.is_code = true;
@@ -2374,33 +2369,27 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line(option);
 
         optgroup = page->new_optgroup(L("Color Change G-code"), 0);
-#if ENABLE_VALIDATE_CUSTOM_GCODE
         optgroup->m_on_change = [this, optgroup](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup, opt_key, value);
         };
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
         option = optgroup->get_option("color_change_gcode");
         option.opt.is_code = true;
         option.opt.height = gcode_field_height;//150;
         optgroup->append_single_option_line(option);
 
         optgroup = page->new_optgroup(L("Pause Print G-code"), 0);
-#if ENABLE_VALIDATE_CUSTOM_GCODE
         optgroup->m_on_change = [this, optgroup](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup, opt_key, value);
         };
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
         option = optgroup->get_option("pause_print_gcode");
         option.opt.is_code = true;
         option.opt.height = gcode_field_height;//150;
         optgroup->append_single_option_line(option);
 
         optgroup = page->new_optgroup(L("Template Custom G-code"), 0);
-#if ENABLE_VALIDATE_CUSTOM_GCODE
         optgroup->m_on_change = [this, optgroup](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup, opt_key, value);
         };
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
         option = optgroup->get_option("template_custom_gcode");
         option.opt.is_code = true;
         option.opt.height = gcode_field_height;//150;
@@ -2690,7 +2679,8 @@ void TabPrinter::build_unregular_pages(bool from_initial_build/* = false*/)
                     {
                         const wxString msg_text = _(L("This is a single extruder multimaterial printer, diameters of all extruders "
                                                       "will be set to the new value. Do you want to proceed?"));
-                        wxMessageDialog dialog(parent(), msg_text, _(L("Nozzle diameter")), wxICON_WARNING | wxYES_NO);
+                        //wxMessageDialog dialog(parent(), msg_text, _(L("Nozzle diameter")), wxICON_WARNING | wxYES_NO);
+                        MessageDialog dialog(parent(), msg_text, _(L("Nozzle diameter")), wxICON_WARNING | wxYES_NO);
 
                         DynamicPrintConfig new_conf = *m_config;
                         if (dialog.ShowModal() == wxID_YES) {
@@ -2921,7 +2911,8 @@ void TabPrinter::toggle_options()
         toggle_option("retract_before_wipe", wipe, i);
 
         if (use_firmware_retraction && wipe) {
-            wxMessageDialog dialog(parent(),
+            //wxMessageDialog dialog(parent(),
+            MessageDialog dialog(parent(),
                 _(L("The Wipe option is not available when using the Firmware Retraction mode.\n"
                     "\nShall I disable it in order to enable Firmware Retraction?")),
                 _(L("Firmware Retraction")), wxICON_WARNING | wxYES | wxNO);
@@ -2965,6 +2956,7 @@ void TabPrinter::update()
     m_presets->get_edited_preset().printer_technology() == ptFFF ? update_fff() : update_sla();
     m_update_cnt--;
 
+    update_description_lines();
     Layout();
 
     if (m_update_cnt == 0)
@@ -3047,11 +3039,24 @@ void Tab::load_current_preset()
                 Page* tmp_page = m_active_page;
                 m_active_page = nullptr;
                 for (auto tab : wxGetApp().tabs_list) {
-                    if (tab->type() == Preset::TYPE_PRINTER) // Printer tab is shown every time
+                    if (tab->type() == Preset::TYPE_PRINTER) { // Printer tab is shown every time
+                        int cur_selection = wxGetApp().tab_panel()->GetSelection();
+                        if (cur_selection != 0)
+                            wxGetApp().tab_panel()->SetSelection(wxGetApp().tab_panel()->GetPageCount() - 1);
                         continue;
+                    }
                     if (tab->supports_printer_technology(printer_technology))
                     {
-                        wxGetApp().tab_panel()->InsertPage(wxGetApp().tab_panel()->FindPage(this), tab, tab->title());
+#ifdef _MSW_DARK_MODE
+                        if (!wxGetApp().tabs_as_menu()) {
+                            std::string bmp_name = tab->type() == Slic3r::Preset::TYPE_FILAMENT      ? "spool" :
+                                                   tab->type() == Slic3r::Preset::TYPE_SLA_MATERIAL  ? "resin" : "cog";
+                            tab->Hide(); // #ys_WORKAROUND : Hide tab before inserting to avoid unwanted rendering of the tab
+                            dynamic_cast<Notebook*>(wxGetApp().tab_panel())->InsertPage(wxGetApp().tab_panel()->FindPage(this), tab, tab->title(), bmp_name);
+                        }
+                        else
+#endif
+                            wxGetApp().tab_panel()->InsertPage(wxGetApp().tab_panel()->FindPage(this), tab, tab->title());
                         #ifdef __linux__ // the tabs apparently need to be explicitly shown on Linux (pull request #1563)
                             int page_id = wxGetApp().tab_panel()->FindPage(tab);
                             wxGetApp().tab_panel()->GetPage(page_id)->Show(true);
@@ -3065,6 +3070,10 @@ void Tab::load_current_preset()
                 }
                 static_cast<TabPrinter*>(this)->m_printer_technology = printer_technology;
                 m_active_page = tmp_page;
+#ifdef _MSW_DARK_MODE
+                if (!wxGetApp().tabs_as_menu())
+                    dynamic_cast<Notebook*>(wxGetApp().tab_panel())->SetPageImage(wxGetApp().tab_panel()->FindPage(this), printer_technology == ptFFF ? "printer" : "sla_printer");
+#endif
             }
             on_presets_changed();
             if (printer_technology == ptFFF) {
@@ -3324,7 +3333,7 @@ void Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
     }
 
     if (technology_changed)
-        wxGetApp().mainframe->diff_dialog.update_presets();
+        wxGetApp().mainframe->technology_changed();
 }
 
 // If the current preset is dirty, the user is asked whether the changes may be discarded.
@@ -3651,7 +3660,8 @@ void Tab::delete_preset()
     // TRN  Remove/Delete
     wxString title = from_u8((boost::format(_utf8(L("%1% Preset"))) % action).str());  //action + _(L(" Preset"));
     if (current_preset.is_default ||
-        wxID_YES != wxMessageDialog(parent(), msg, title, wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION).ShowModal())
+        //wxID_YES != wxMessageDialog(parent(), msg, title, wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION).ShowModal())
+        wxID_YES != MessageDialog(parent(), msg, title, wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION).ShowModal())
         return;
 
     // if we just delete preset from the physical printer
@@ -3730,6 +3740,7 @@ wxSizer* Tab::compatible_widget_create(wxWindow* parent, PresetDependencies &dep
 {
     deps.checkbox = new wxCheckBox(parent, wxID_ANY, _(L("All")));
     deps.checkbox->SetFont(Slic3r::GUI::wxGetApp().normal_font());
+    wxGetApp().UpdateDarkUI(deps.checkbox, false, true);
     deps.btn = new ScalableButton(parent, wxID_ANY, "printer", from_u8((boost::format(" %s %s") % _utf8(L("Set")) % std::string(dots.ToUTF8())).str()),
                                   wxDefaultSize, wxDefaultPosition, wxBU_LEFT | wxBU_EXACTFIT, true);
     deps.btn->SetFont(Slic3r::GUI::wxGetApp().normal_font());
@@ -3768,6 +3779,7 @@ wxSizer* Tab::compatible_widget_create(wxWindow* parent, PresetDependencies &dep
         }
 
         wxMultiChoiceDialog dlg(parent, deps.dialog_title, deps.dialog_label, presets);
+        wxGetApp().UpdateDlgDarkUI(&dlg);
         // Collect and set indices of depending_presets marked as compatible.
         wxArrayInt selections;
         auto *compatible_printers = dynamic_cast<const ConfigOptionStrings*>(m_config->option(deps.key_list));
@@ -3861,7 +3873,6 @@ void TabPrinter::apply_extruder_cnt_from_cache()
     }
 }
 
-#if ENABLE_VALIDATE_CUSTOM_GCODE
 bool Tab::validate_custom_gcodes()
 {
     if (m_type != Preset::TYPE_FILAMENT &&
@@ -3887,7 +3898,6 @@ bool Tab::validate_custom_gcodes()
     }
     return valid;
 }
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
 
 void TabPrinter::update_machine_limits_description(const MachineLimitsUsage usage)
 {
@@ -4114,7 +4124,6 @@ ConfigOptionsGroupShp Page::new_optgroup(const wxString& title, int noncommon_la
     return optgroup;
 }
 
-#if ENABLE_VALIDATE_CUSTOM_GCODE
 const ConfigOptionsGroupShp Page::get_optgroup(const wxString& title) const
 {
     for (ConfigOptionsGroupShp optgroup : m_optgroups) {
@@ -4124,7 +4133,6 @@ const ConfigOptionsGroupShp Page::get_optgroup(const wxString& title) const
 
     return nullptr;
 }
-#endif // ENABLE_VALIDATE_CUSTOM_GCODE
 
 void TabSLAMaterial::build()
 {
@@ -4230,6 +4238,9 @@ void TabSLAMaterial::update()
 {
     if (m_preset_bundle->printers.get_selected_preset().printer_technology() == ptFFF)
         return;
+
+    update_description_lines();
+    Layout();
 
 // #ys_FIXME. Just a template for this function
 //     m_update_cnt++;

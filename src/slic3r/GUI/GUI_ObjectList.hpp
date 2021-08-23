@@ -39,6 +39,7 @@ typedef std::map<t_layer_height_range, ModelConfig> t_layer_config_ranges;
 namespace GUI {
 
 wxDECLARE_EVENT(EVT_OBJ_LIST_OBJECT_SELECT, SimpleEvent);
+class BitmapComboBox;
 
 struct ItemForDelete
 {
@@ -144,7 +145,7 @@ private:
     ModelConfig                 *m_config {nullptr};
     std::vector<ModelObject*>   *m_objects{ nullptr };
 
-    wxBitmapComboBox            *m_extruder_editor { nullptr };
+    BitmapComboBox              *m_extruder_editor { nullptr };
 
     std::vector<wxBitmap*>      m_bmp_vector;
 
@@ -201,6 +202,7 @@ public:
     void                update_extruder_in_config(const wxDataViewItem& item);
     // update changed name in the object model
     void                update_name_in_model(const wxDataViewItem& item) const;
+    void                update_name_in_list(int obj_idx, int vol_idx) const;
     void                update_extruder_values_for_items(const size_t max_extruder);
 
     // Get obj_idx and vol_idx values for the selected (by default) or an adjusted item
@@ -237,10 +239,13 @@ public:
     void                show_settings(const wxDataViewItem settings_item);
     bool                is_instance_or_object_selected();
 
-    void                load_subobject(ModelVolumeType type);
-    void                load_part(ModelObject* model_object, std::vector<ModelVolume*> &added_volumes, ModelVolumeType type);
-	void                load_generic_subobject(const std::string& type_name, const ModelVolumeType type);
+    void                load_subobject(ModelVolumeType type, bool from_galery = false);
+    void                load_part(ModelObject& model_object, std::vector<ModelVolume*>& added_volumes, ModelVolumeType type, bool from_galery = false);
+    void                load_modifier(ModelObject& model_object, std::vector<ModelVolume*>& added_volumes, ModelVolumeType type, bool from_galery = false);
+    void                load_generic_subobject(const std::string& type_name, const ModelVolumeType type);
     void                load_shape_object(const std::string &type_name);
+    void                load_shape_object_from_gallery();
+    void                load_shape_object_from_gallery(const wxArrayString& input_files);
     void                load_mesh_object(const TriangleMesh &mesh, const wxString &name, bool center = true);
     void                del_object(const int obj_idx);
     void                del_subobject_item(wxDataViewItem& item);
@@ -249,6 +254,7 @@ public:
     void                del_layer_from_object(const int obj_idx, const t_layer_height_range& layer_range);
     void                del_layers_from_object(const int obj_idx);
     bool                del_subobject_from_object(const int obj_idx, const int idx, const int type);
+    void                del_info_item(const int obj_idx, InfoItemType type);
     void                split();
     void                merge(bool to_multipart_object);
     void                layers_editing();
@@ -345,13 +351,14 @@ public:
     void update_and_show_object_settings_item();
     void update_settings_item_and_selection(wxDataViewItem item, wxDataViewItemArray& selections);
     void update_object_list_by_printer_technology();
-    void update_info_items(size_t obj_idx);
+    void update_info_items(size_t obj_idx, wxDataViewItemArray* selections = nullptr, bool added_object = false);
 
     void instances_to_separated_object(const int obj_idx, const std::set<int>& inst_idx);
     void instances_to_separated_objects(const int obj_idx);
     void split_instances();
     void rename_item();
     void fix_through_netfabb();
+    void simplify();
     void update_item_error_icon(const int obj_idx, int vol_idx) const ;
 
     void copy_layers_to_clipboard();
@@ -373,6 +380,7 @@ public:
     void set_extruder_for_selected_items(const int extruder) const ;
     wxDataViewItemArray reorder_volumes_and_get_selection(int obj_idx, std::function<bool(const ModelVolume*)> add_to_selection = nullptr);
     void apply_volumes_order();
+    bool has_paint_on_segmentation();
 
 private:
 #ifdef __WXOSX__

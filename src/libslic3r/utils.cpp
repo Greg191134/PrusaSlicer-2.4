@@ -8,6 +8,7 @@
 
 #include "Platform.hpp"
 #include "Time.hpp"
+#include "libslic3r.h"
 
 #ifdef WIN32
 	#include <windows.h>
@@ -43,7 +44,13 @@
 #include <boost/nowide/convert.hpp>
 #include <boost/nowide/cstdio.hpp>
 
-#include <tbb/task_scheduler_init.h>
+// We are using quite an old TBB 2017 U7, which does not support global control API officially.
+// Before we update our build servers, let's use the old API, which is deprecated in up to date TBB.
+#ifdef TBB_HAS_GLOBAL_CONTROL
+    #include <tbb/global_control.h>
+#else
+    #include <tbb/task_scheduler_init.h>
+#endif
 
 #if defined(__linux__) || defined(__GNUC__ )
 #include <strings.h>
@@ -118,9 +125,12 @@ void trace(unsigned int level, const char *message)
 void disable_multi_threading()
 {
     // Disable parallelization so the Shiny profiler works
-    static tbb::task_scheduler_init *tbb_init = nullptr;
-    if (tbb_init == nullptr)
-        tbb_init = new tbb::task_scheduler_init(1);
+#ifdef TBB_HAS_GLOBAL_CONTROL
+    tbb::global_control(tbb::global_control::max_allowed_parallelism, 1);
+#else // TBB_HAS_GLOBAL_CONTROL
+    static tbb::task_scheduler_init *tbb_init = new tbb::task_scheduler_init(1);
+    UNUSED(tbb_init);
+#endif // TBB_HAS_GLOBAL_CONTROL
 }
 
 static std::string g_var_dir;
@@ -165,6 +175,18 @@ const std::string& localization_dir()
 	return g_local_dir;
 }
 
+static std::string g_sys_shapes_dir;
+
+void set_sys_shapes_dir(const std::string &dir)
+{
+    g_sys_shapes_dir = dir;
+}
+
+const std::string& sys_shapes_dir()
+{
+	return g_sys_shapes_dir;
+}
+
 // Translate function callback, to call wxWidgets translate function to convert non-localized UTF8 string to a localized one.
 Slic3r::I18N::translate_fn_type Slic3r::I18N::translate_fn = nullptr;
 
@@ -178,6 +200,11 @@ void set_data_dir(const std::string &dir)
 const std::string& data_dir()
 {
     return g_data_dir;
+}
+
+std::string custom_shapes_dir()
+{
+    return (boost::filesystem::path(g_data_dir) / "shapes").string();
 }
 
 #ifdef _WIN32
@@ -424,6 +451,53 @@ std::error_code rename_file(const std::string &from, const std::string &to)
 }
 
 #ifdef __linux__
+// Copied from boost::filesystem. 
+// Called by copy_file_linux() in case linux sendfile() API is not supported.
+int copy_file_linux_read_write(int infile, int outfile, uintmax_t file_size)
+{
+    std::vector<char> buf(
+	    // Prefer the buffer to be larger than the file size so that we don't have
+	    // to perform an extra read if the file fits in the buffer exactly.
+    	std::clamp<size_t>(file_size + (file_size < ~static_cast<uintmax_t >(0u)),
+		// Min and max buffer sizes are selected to minimize the overhead from system calls.
+		// The values are picked based on coreutils cp(1) benchmarking data described here:
+		// https://github.com/coreutils/coreutils/blob/d1b0257077c0b0f0ee25087efd46270345d1dd1f/src/ioblksize.h#L23-L72
+    			   		   8u * 1024u, 256u * 1024u),
+    	0);
+
+#if defined(POSIX_FADV_SEQUENTIAL)
+    ::posix_fadvise(infile, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
+
+    // Don't use file size to limit the amount of data to copy since some filesystems, like procfs or sysfs,
+    // provide files with generated content and indicate that their size is zero or 4096. Just copy as much data
+    // as we can read from the input file.
+    while (true) {
+        ssize_t sz_read = ::read(infile, buf.data(), buf.size());
+        if (sz_read == 0)
+            break;
+        if (sz_read < 0) {
+            int err = errno;
+            if (err == EINTR)
+                continue;
+            return err;
+        }
+        // Allow for partial writes - see Advanced Unix Programming (2nd Ed.),
+        // Marc Rochkind, Addison-Wesley, 2004, page 94
+        for (ssize_t sz_wrote = 0; sz_wrote < sz_read;) {
+            ssize_t sz = ::write(outfile, buf.data() + sz_wrote, static_cast<std::size_t>(sz_read - sz_wrote));
+            if (sz < 0) {
+                int err = errno;
+                if (err == EINTR)
+                    continue;
+                return err;
+            }
+            sz_wrote += sz;
+        }
+    }
+    return 0;
+}
+
 // Copied from boost::filesystem, to support copying a file to a weird filesystem, which does not support changing file attributes,
 // for example ChromeOS Linux integration or FlashAIR WebDAV.
 // Copied and simplified from boost::filesystem::detail::copy_file() with option = overwrite_if_exists and with just the Linux path kept,
@@ -520,6 +594,19 @@ bool copy_file_linux(const boost::filesystem::path &from, const boost::filesyste
 			ssize_t sz = ::sendfile(outfile.fd, infile.fd, nullptr, size_to_copy);
 			if (sz < 0) {
 				err = errno;
+	            if (offset == 0u) {
+	                // sendfile may fail with EINVAL if the underlying filesystem does not support it.
+	                // See https://patchwork.kernel.org/project/linux-nfs/patch/20190411183418.4510-1-olga.kornievskaia@gmail.com/
+	                // https://bugzilla.redhat.com/show_bug.cgi?id=1783554.
+	                // https://github.com/boostorg/filesystem/commit/4b9052f1e0b2acf625e8247582f44acdcc78a4ce
+	                if (err == EINVAL || err == EOPNOTSUPP) {
+						err = copy_file_linux_read_write(infile.fd, outfile.fd, from_stat.st_size);
+						if (err < 0)
+							goto fail;
+						// Succeeded.
+	                	break;
+	                }
+	            }
 				if (err == EINTR)
 					continue;
 				if (err == 0)
@@ -674,6 +761,26 @@ bool is_gcode_file(const std::string &path)
 		   boost::iends_with(path, ".g")     || boost::iends_with(path, ".ngc");
 }
 
+bool is_img_file(const std::string &path)
+{
+	return boost::iends_with(path, ".png") || boost::iends_with(path, ".svg");
+}
+
+bool is_gallery_file(const boost::filesystem::directory_entry& dir_entry, char const* type)
+{
+	return is_plain_file(dir_entry) && strcasecmp(dir_entry.path().extension().string().c_str(), type) == 0;
+}
+
+bool is_gallery_file(const std::string &path, char const* type)
+{
+	return boost::iends_with(path, type);
+}
+
+bool is_shapes_dir(const std::string& dir)
+{
+	return dir == sys_shapes_dir() || dir == custom_shapes_dir();
+}
+
 } // namespace Slic3r
 
 #ifdef WIN32
@@ -781,7 +888,7 @@ unsigned get_current_pid()
 #endif
 }
 
-std::string xml_escape(std::string text)
+std::string xml_escape(std::string text, bool is_marked/* = false*/)
 {
     std::string::size_type pos = 0;
     for (;;)
@@ -796,8 +903,8 @@ std::string xml_escape(std::string text)
         case '\"': replacement = "&quot;"; break;
         case '\'': replacement = "&apos;"; break;
         case '&':  replacement = "&amp;";  break;
-        case '<':  replacement = "&lt;";   break;
-        case '>':  replacement = "&gt;";   break;
+        case '<':  replacement = is_marked ? "<" :"&lt;"; break;
+        case '>':  replacement = is_marked ? ">" :"&gt;"; break;
         default: break;
         }
 

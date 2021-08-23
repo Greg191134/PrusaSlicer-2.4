@@ -21,6 +21,7 @@ void GLGizmoFdmSupports::on_shutdown()
 {
     m_angle_threshold_deg = 0.f;
     m_parent.use_slope(false);
+    m_parent.toggle_model_objects_visibility(true);
 }
 
 
@@ -66,8 +67,8 @@ void GLGizmoFdmSupports::render_painter_gizmo() const
     glsafe(::glEnable(GL_DEPTH_TEST));
 
     render_triangles(selection);
-
     m_c->object_clipper()->render_cut();
+    m_c->instances_hider()->render_cut();
     render_cursor();
 
     glsafe(::glDisable(GL_BLEND));
@@ -103,10 +104,10 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
     const float buttons_width = std::max(button_enforce_width, button_cancel_width) + m_imgui->scaled(0.5f);
     const float minimal_slider_width = m_imgui->scaled(4.f);
 
-    float caption_max = 0.f;
-    float total_text_max = 0.;
-    for (const std::string& t : {"enforce", "block", "remove"}) {
-        caption_max = std::max(caption_max, m_imgui->calc_text_size(m_desc.at(t+"_caption")).x);
+    float caption_max    = 0.f;
+    float total_text_max = 0.f;
+    for (const auto &t : std::array<std::string, 3>{"enforce", "block", "remove"}) {
+        caption_max    = std::max(caption_max, m_imgui->calc_text_size(m_desc.at(t + "_caption")).x);
         total_text_max = std::max(total_text_max, caption_max + m_imgui->calc_text_size(m_desc.at(t)).x);
     }
     caption_max += m_imgui->scaled(1.f);
@@ -124,7 +125,7 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
         m_imgui->text(text);
     };
 
-    for (const std::string& t : {"enforce", "block", "remove"})
+    for (const auto &t : std::array<std::string, 3>{"enforce", "block", "remove"})
         draw_text_with_caption(m_desc.at(t + "_caption"), m_desc.at(t));
 
     m_imgui->text("");
@@ -151,6 +152,7 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
     if (m_imgui->button(m_desc["enforce_button"], buttons_width, 0.f)) {
         select_facets_by_angle(m_angle_threshold_deg, false);
         m_angle_threshold_deg = 0.f;
+        m_parent.use_slope(false);
     }
     ImGui::SameLine(window_width - buttons_width);
     if (m_imgui->button(m_desc["cancel"], buttons_width, 0.f)) {
@@ -169,6 +171,7 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
             if (mv->is_model_part()) {
                 ++idx;
                 m_triangle_selectors[idx]->reset();
+                m_triangle_selectors[idx]->request_update_render_data();
             }
         }
 
@@ -183,7 +186,7 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
     m_imgui->text(m_desc.at("cursor_size"));
     ImGui::SameLine(cursor_slider_left);
     ImGui::PushItemWidth(window_width - cursor_slider_left);
-    ImGui::SliderFloat(" ", &m_cursor_radius, CursorRadiusMin, CursorRadiusMax, "%.2f");
+    m_imgui->slider_float(" ", &m_cursor_radius, CursorRadiusMin, CursorRadiusMax, "%.2f");
     if (ImGui::IsItemHovered()) {
         ImGui::BeginTooltip();
         ImGui::PushTextWrapPos(max_tooltip_width);
@@ -247,7 +250,7 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
     ImGui::SameLine(clipping_slider_left);
     ImGui::PushItemWidth(window_width - clipping_slider_left);
     auto clp_dist = float(m_c->object_clipper()->get_position());
-    if (ImGui::SliderFloat("  ", &clp_dist, 0.f, 1.f, "%.2f"))
+    if (m_imgui->slider_float("  ", &clp_dist, 0.f, 1.f, "%.2f"))
         m_c->object_clipper()->set_position(clp_dist, true);
 
     if (ImGui::IsItemHovered()) {
@@ -284,13 +287,12 @@ void GLGizmoFdmSupports::select_facets_by_angle(float threshold_deg, bool block)
 
         // Now calculate dot product of vert_direction and facets' normals.
         int idx = -1;
-        for (const stl_facet& facet : mv->mesh().stl.facet_start) {
+        for (const stl_facet &facet : mv->mesh().stl.facet_start) {
             ++idx;
-            if (facet.normal.dot(down) > dot_limit)
-                m_triangle_selectors[mesh_id]->set_facet(idx,
-                                                         block
-                                                         ? EnforcerBlockerType::BLOCKER
-                                                         : EnforcerBlockerType::ENFORCER);
+            if (facet.normal.dot(down) > dot_limit) {
+                m_triangle_selectors[mesh_id]->set_facet(idx, block ? EnforcerBlockerType::BLOCKER : EnforcerBlockerType::ENFORCER);
+                m_triangle_selectors.back()->request_update_render_data();
+            }
         }
     }
 
@@ -344,7 +346,9 @@ void GLGizmoFdmSupports::update_from_model_object()
         const TriangleMesh* mesh = &mv->mesh();
 
         m_triangle_selectors.emplace_back(std::make_unique<TriangleSelectorGUI>(*mesh));
-        m_triangle_selectors.back()->deserialize(mv->supported_facets.get_data());
+        // Reset of TriangleSelector is done inside TriangleSelectorGUI's constructor, so we don't need it to perform it again in deserialize().
+        m_triangle_selectors.back()->deserialize(mv->supported_facets.get_data(), false);
+        m_triangle_selectors.back()->request_update_render_data();
     }
 }
 
