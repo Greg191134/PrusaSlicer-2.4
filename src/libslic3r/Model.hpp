@@ -285,6 +285,10 @@ public:
     void                    clear_volumes();
     void                    sort_volumes(bool full_sort);
     bool                    is_multiparts() const { return volumes.size() > 1; }
+    // Checks if any of object volume is painted using the fdm support painting gizmo.
+    bool                    is_fdm_support_painted() const;
+    // Checks if any of object volume is painted using the seam painting gizmo.
+    bool                    is_seam_painted() const;
     // Checks if any of object volume is painted using the multi-material painting gizmo.
     bool                    is_mm_painted() const;
 
@@ -347,6 +351,7 @@ public:
 
     size_t materials_count() const;
     size_t facets_count() const;
+    size_t parts_count() const;
     bool needed_repair() const;
     ModelObjectPtrs cut(size_t instance, coordf_t z, ModelObjectCutAttributes attributes);
     void split(ModelObjectPtrs* new_objects);
@@ -358,7 +363,9 @@ public:
     void bake_xy_rotation_into_meshes(size_t instance_idx);
 
     double get_min_z() const;
+    double get_max_z() const;
     double get_instance_min_z(size_t instance_idx) const;
+    double get_instance_max_z(size_t instance_idx) const;
 
     // Called by Print::validate() from the UI thread.
     unsigned int check_instances_print_volume_state(const BoundingBoxf3& print_volume);
@@ -538,7 +545,10 @@ public:
     indexed_triangle_set get_facets_strict(const ModelVolume& mv, EnforcerBlockerType type) const;
     bool has_facets(const ModelVolume& mv, EnforcerBlockerType type) const;
     bool empty() const { return m_data.first.empty(); }
-    void clear();
+
+    // Following method clears the config and increases its timestamp, so the deleted
+    // state is considered changed from perspective of the undo/redo stack.
+    void reset();
 
     // Serialize triangle into string, for serialization into 3MF/AMF.
     std::string get_triangle_as_string(int i) const;
@@ -717,6 +727,8 @@ public:
         this->mmu_segmentation_facets.set_new_unique_id();
     }
 
+    bool is_fdm_support_painted() const { return !this->supported_facets.empty(); }
+    bool is_seam_painted() const { return !this->seam_facets.empty(); }
     bool is_mm_painted() const { return !this->mmu_segmentation_facets.empty(); }
 
 protected:
@@ -762,7 +774,7 @@ private:
         assert(this->id() != this->supported_facets.id());
         assert(this->id() != this->seam_facets.id());
         assert(this->id() != this->mmu_segmentation_facets.id());
-        if (mesh.stl.stats.number_of_facets > 1)
+        if (mesh.facets_count() > 1)
             calculate_convex_hull();
     }
     ModelVolume(ModelObject *object, TriangleMesh &&mesh, TriangleMesh &&convex_hull, ModelVolumeType type = ModelVolumeType::MODEL_PART) :
@@ -818,7 +830,7 @@ private:
         assert(this->config.id() == other.config.id());
         this->set_material_id(other.material_id());
         this->config.set_new_unique_id();
-        if (mesh.stl.stats.number_of_facets > 1)
+        if (mesh.facets_count() > 1)
             calculate_convex_hull();
 		assert(this->config.id().valid()); 
         assert(this->config.id() != other.config.id()); 
@@ -1121,6 +1133,13 @@ public:
     // Propose an output path, replace extension. The new_extension shall contain the initial dot.
     std::string   propose_export_file_name_and_path(const std::string &new_extension) const;
 
+    // Checks if any of objects is painted using the fdm support painting gizmo.
+    bool          is_fdm_support_painted() const;
+    // Checks if any of objects is painted using the seam painting gizmo.
+    bool          is_seam_painted() const;
+    // Checks if any of objects is painted using the multi-material painting gizmo.
+    bool          is_mm_painted() const;
+
 private:
     explicit Model(int) : ObjectBase(-1) { assert(this->id().invalid()); }
 	void assign_new_unique_ids_recursive();
@@ -1177,6 +1196,7 @@ void check_model_ids_equal(const Model &model1, const Model &model2);
 #endif /* NDEBUG */
 
 static const float SINKING_Z_THRESHOLD = -0.001f;
+static const double SINKING_MIN_Z_THRESHOLD = 0.05;
 
 } // namespace Slic3r
 

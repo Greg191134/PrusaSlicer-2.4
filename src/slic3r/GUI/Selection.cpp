@@ -620,24 +620,54 @@ const GLVolume* Selection::get_volume(unsigned int volume_idx) const
 
 const BoundingBoxf3& Selection::get_bounding_box() const
 {
-    if (m_bounding_box_dirty)
-        calc_bounding_box();
-
-    return m_bounding_box;
+    if (!m_bounding_box.has_value()) {
+        std::optional<BoundingBoxf3>* bbox = const_cast<std::optional<BoundingBoxf3>*>(&m_bounding_box);
+        *bbox = BoundingBoxf3();
+        if (m_valid) {
+            for (unsigned int i : m_list) {
+                (*bbox)->merge((*m_volumes)[i]->transformed_convex_hull_bounding_box());
+            }
+        }
+    }
+    return *m_bounding_box;
 }
 
 const BoundingBoxf3& Selection::get_unscaled_instance_bounding_box() const
 {
-    if (m_unscaled_instance_bounding_box_dirty)
-        calc_unscaled_instance_bounding_box();
-    return m_unscaled_instance_bounding_box;
+    if (!m_unscaled_instance_bounding_box.has_value()) {
+        std::optional<BoundingBoxf3>* bbox = const_cast<std::optional<BoundingBoxf3>*>(&m_unscaled_instance_bounding_box);
+        *bbox = BoundingBoxf3();
+        if (m_valid) {
+            for (unsigned int i : m_list) {
+                const GLVolume& volume = *(*m_volumes)[i];
+                if (volume.is_modifier)
+                    continue;
+                Transform3d trafo = volume.get_instance_transformation().get_matrix(false, false, true, false) * volume.get_volume_transformation().get_matrix();
+                trafo.translation().z() += volume.get_sla_shift_z();
+                (*bbox)->merge(volume.transformed_convex_hull_bounding_box(trafo));
+            }
+        }
+    }
+    return *m_unscaled_instance_bounding_box;
 }
 
 const BoundingBoxf3& Selection::get_scaled_instance_bounding_box() const
 {
-    if (m_scaled_instance_bounding_box_dirty)
-        calc_scaled_instance_bounding_box();
-    return m_scaled_instance_bounding_box;
+    if (!m_scaled_instance_bounding_box.has_value()) {
+        std::optional<BoundingBoxf3>* bbox = const_cast<std::optional<BoundingBoxf3>*>(&m_scaled_instance_bounding_box);
+        *bbox = BoundingBoxf3();
+        if (m_valid) {
+            for (unsigned int i : m_list) {
+                const GLVolume& volume = *(*m_volumes)[i];
+                if (volume.is_modifier)
+                    continue;
+                Transform3d trafo = volume.get_instance_transformation().get_matrix(false, false, false, false) * volume.get_volume_transformation().get_matrix();
+                trafo.translation().z() += volume.get_sla_shift_z();
+                (*bbox)->merge(volume.transformed_convex_hull_bounding_box(trafo));
+            }
+        }
+    }
+    return *m_scaled_instance_bounding_box;
 }
 
 void Selection::start_dragging()
@@ -683,7 +713,8 @@ void Selection::translate(const Vec3d& displacement, bool local)
         synchronize_unselected_volumes();
 #endif // !DISABLE_INSTANCES_SYNCH
 
-    this->set_bounding_boxes_dirty();
+    ensure_not_below_bed();
+    set_bounding_boxes_dirty();
 }
 
 // Rotate an object around one of the axes. Only one rotation component is expected to be changing.
@@ -822,10 +853,10 @@ void Selection::flattening_rotate(const Vec3d& normal)
     }
 
 #if !DISABLE_INSTANCES_SYNCH
-    // we want to synchronize z-rotation as well, otherwise the flattening behaves funny
-    // when applied on one of several identical instances
+    // Apply the same transformation also to other instances,
+    // but respect their possibly diffrent z-rotation.
     if (m_mode == Instance)
-        synchronize_unselected_instances(SYNC_ROTATION_FULL);
+        synchronize_unselected_instances(SYNC_ROTATION_GENERAL);
 #endif // !DISABLE_INSTANCES_SYNCH
 
     this->set_bounding_boxes_dirty();
@@ -1148,6 +1179,7 @@ void Selection::erase()
         }
 
         wxGetApp().obj_list()->delete_from_model_and_list(items);
+        ensure_not_below_bed();
     }
 }
 
@@ -1690,52 +1722,6 @@ void Selection::do_remove_object(unsigned int object_idx)
     }
 }
 
-void Selection::calc_bounding_box() const
-{
-    BoundingBoxf3* bounding_box = const_cast<BoundingBoxf3*>(&m_bounding_box);
-    *bounding_box = BoundingBoxf3();
-    if (m_valid) {
-        for (unsigned int i : m_list) {
-            bounding_box->merge((*m_volumes)[i]->transformed_convex_hull_bounding_box());
-        }
-    }
-    *const_cast<bool*>(&m_bounding_box_dirty) = false;
-}
-
-void Selection::calc_unscaled_instance_bounding_box() const
-{
-    BoundingBoxf3* unscaled_instance_bounding_box = const_cast<BoundingBoxf3*>(&m_unscaled_instance_bounding_box);
-    *unscaled_instance_bounding_box = BoundingBoxf3();
-    if (m_valid) {
-        for (unsigned int i : m_list) {
-            const GLVolume& volume = *(*m_volumes)[i];
-            if (volume.is_modifier)
-                continue;
-            Transform3d trafo = volume.get_instance_transformation().get_matrix(false, false, true, false) * volume.get_volume_transformation().get_matrix();
-            trafo.translation()(2) += volume.get_sla_shift_z();
-            unscaled_instance_bounding_box->merge(volume.transformed_convex_hull_bounding_box(trafo));
-        }
-    }
-    *const_cast<bool*>(&m_unscaled_instance_bounding_box_dirty) = false;
-}
-
-void Selection::calc_scaled_instance_bounding_box() const
-{
-    BoundingBoxf3* scaled_instance_bounding_box = const_cast<BoundingBoxf3*>(&m_scaled_instance_bounding_box);
-    *scaled_instance_bounding_box = BoundingBoxf3();
-    if (m_valid) {
-        for (unsigned int i : m_list) {
-            const GLVolume& volume = *(*m_volumes)[i];
-            if (volume.is_modifier)
-                continue;
-            Transform3d trafo = volume.get_instance_transformation().get_matrix(false, false, false, false) * volume.get_volume_transformation().get_matrix();
-            trafo.translation()(2) += volume.get_sla_shift_z();
-            scaled_instance_bounding_box->merge(volume.transformed_convex_hull_bounding_box(trafo));
-        }
-    }
-    *const_cast<bool*>(&m_scaled_instance_bounding_box_dirty) = false;
-}
-
 void Selection::render_selected_volumes() const
 {
     float color[3] = { 1.0f, 1.0f, 1.0f };
@@ -1872,7 +1858,7 @@ void Selection::render_sidebar_scale_hints(const std::string& sidebar_field) con
         const_cast<GLModel*>(&m_arrow)->set_color(-1, uniform_scale ? UNIFORM_SCALE_COLOR : get_color(axis));
         GLShaderProgram* shader = wxGetApp().get_current_shader();
         if (shader != nullptr)
-            shader->set_uniform("emission_factor", 0.0);
+            shader->set_uniform("emission_factor", 0.0f);
 
         glsafe(::glTranslated(0.0, 5.0, 0.0));
         m_arrow.render();
@@ -2053,10 +2039,6 @@ void Selection::synchronize_unselected_instances(SyncRotationType sync_rotation_
                     v->set_instance_offset(Z, volume->get_instance_offset().z());
                 break;
             }
-            case SYNC_ROTATION_FULL:
-                // rotation comes from place on face -> force given z
-                v->set_instance_rotation({ rotation.x(), rotation.y(), rotation.z() });
-                break;
             case SYNC_ROTATION_GENERAL:
                 // generic rotation -> update instance z with the delta of the rotation.
                 const double z_diff = Geometry::rotation_diff_z(m_cache.volumes_data[i].get_instance_rotation(), m_cache.volumes_data[j].get_instance_rotation());
@@ -2131,6 +2113,44 @@ void Selection::ensure_on_bed()
         InstancesToZMap::iterator it = instances_min_z.find(instance);
         if (it != instances_min_z.end())
             volume->set_instance_offset(Z, volume->get_instance_offset(Z) - it->second);
+    }
+}
+
+void Selection::ensure_not_below_bed()
+{
+    typedef std::map<std::pair<int, int>, double> InstancesToZMap;
+    InstancesToZMap instances_max_z;
+
+    for (size_t i = 0; i < m_volumes->size(); ++i) {
+        GLVolume* volume = (*m_volumes)[i];
+        if (!volume->is_wipe_tower && !volume->is_modifier) {
+            const double max_z = volume->transformed_convex_hull_bounding_box().max.z();
+            std::pair<int, int> instance = std::make_pair(volume->object_idx(), volume->instance_idx());
+            InstancesToZMap::iterator it = instances_max_z.find(instance);
+            if (it == instances_max_z.end())
+                it = instances_max_z.insert(InstancesToZMap::value_type(instance, -DBL_MAX)).first;
+
+            it->second = std::max(it->second, max_z);
+        }
+    }
+
+    if (is_any_volume()) {
+        for (unsigned int i : m_list) {
+            GLVolume& volume = *(*m_volumes)[i];
+            std::pair<int, int> instance = std::make_pair(volume.object_idx(), volume.instance_idx());
+            InstancesToZMap::iterator it = instances_max_z.find(instance);
+            double z_shift = SINKING_MIN_Z_THRESHOLD - it->second;
+            if (it != instances_max_z.end() && z_shift > 0.0)
+                volume.set_volume_offset(Z, volume.get_volume_offset(Z) + z_shift);
+        }
+    }
+    else {
+        for (GLVolume* volume : *m_volumes) {
+            std::pair<int, int> instance = std::make_pair(volume->object_idx(), volume->instance_idx());
+            InstancesToZMap::iterator it = instances_max_z.find(instance);
+            if (it != instances_max_z.end() && it->second < SINKING_MIN_Z_THRESHOLD)
+                volume->set_instance_offset(Z, volume->get_instance_offset(Z) + SINKING_MIN_Z_THRESHOLD - it->second);
+        }
     }
 }
 

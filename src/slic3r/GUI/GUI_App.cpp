@@ -87,6 +87,11 @@
 #include <boost/nowide/fstream.hpp>
 #endif // ENABLE_THUMBNAIL_GENERATOR_DEBUG
 
+// Needed for forcing menu icons back under gtk2 and gtk3
+#if defined(__WXGTK20__) || defined(__WXGTK3__)
+    #include <gtk/gtk.h>
+#endif
+
 namespace Slic3r {
 namespace GUI {
 
@@ -424,9 +429,8 @@ wxString file_wildcards(FileType file_type, const std::string &custom_extension)
         /* FT_OBJ */     "OBJ files (*.obj)|*.obj;*.OBJ",
         /* FT_AMF */     "AMF files (*.amf)|*.zip.amf;*.amf;*.AMF;*.xml;*.XML",
         /* FT_3MF */     "3MF files (*.3mf)|*.3mf;*.3MF;",
-        /* FT_PRUSA */   "Prusa Control files (*.prusa)|*.prusa;*.PRUSA",
         /* FT_GCODE */   "G-code files (*.gcode, *.gco, *.g, *.ngc)|*.gcode;*.GCODE;*.gco;*.GCO;*.g;*.G;*.ngc;*.NGC",
-        /* FT_MODEL */   "Known files (*.stl, *.obj, *.amf, *.xml, *.3mf, *.prusa)|*.stl;*.STL;*.obj;*.OBJ;*.amf;*.AMF;*.xml;*.XML;*.3mf;*.3MF;*.prusa;*.PRUSA",
+        /* FT_MODEL */   "Known files (*.stl, *.obj, *.amf, *.xml, *.3mf, *.prusa)|*.stl;*.STL;*.obj;*.OBJ;*.amf;*.AMF;*.xml;*.XML;*.3mf;*.3MF",
         /* FT_PROJECT */ "Project files (*.3mf, *.amf)|*.3mf;*.3MF;*.amf;*.AMF",
         /* FT_GALLERY */ "Known files (*.stl, *.obj)|*.stl;*.STL;*.obj;*.OBJ",
 
@@ -799,6 +803,14 @@ bool GUI_App::OnInit()
 
 bool GUI_App::on_init_inner()
 {
+    // Forcing back menu icons under gtk2 and gtk3. Solution is based on:
+    // https://docs.gtk.org/gtk3/class.Settings.html
+    // see also https://docs.wxwidgets.org/3.0/classwx_menu_item.html#a2b5d6bcb820b992b1e4709facbf6d4fb
+    // TODO: Find workaround for GTK4
+#if defined(__WXGTK20__) || defined(__WXGTK3__)
+    g_object_set (gtk_settings_get_default (), "gtk-menu-images", TRUE, NULL);
+#endif
+
     // Verify resources path
     const wxString resources_dir = from_u8(Slic3r::resources_dir());
     wxCHECK_MSG(wxDirExists(resources_dir), false,
@@ -944,6 +956,8 @@ bool GUI_App::on_init_inner()
     sidebar().obj_list()->init_objects(); // propagate model objects to object list
 //     update_mode(); // !!! do that later
     SetTopWindow(mainframe);
+
+    plater_->init_notification_manager();
 
     m_printhost_job_queue.reset(new PrintHostJobQueue(mainframe->printhost_queue_dlg()));
 
@@ -2069,10 +2083,10 @@ std::vector<std::pair<unsigned int, std::string>> GUI_App::get_selected_presets(
 
 // This is called when closing the application, when loading a config file or when starting the config wizard
 // to notify the user whether he is aware that some preset changes will be lost.
-bool GUI_App::check_and_save_current_preset_changes(const wxString& header)
+bool GUI_App::check_and_save_current_preset_changes(const wxString& header, const wxString& caption)
 {
     if (/*this->plater()->model().objects.empty() && */has_current_preset_changes()) {
-        UnsavedChangesDialog dlg(header);
+        UnsavedChangesDialog dlg(header, caption);
         if (wxGetApp().app_config->get("default_action_on_close_application") == "none" && dlg.ShowModal() == wxID_CANCEL)
             return false;
 
@@ -2265,7 +2279,7 @@ wxBookCtrlBase* GUI_App::tab_panel() const
     return mainframe->m_tabpanel;
 }
 
-NotificationManager* GUI_App::notification_manager() 
+std::shared_ptr<NotificationManager> GUI_App::notification_manager() 
 {
     return plater_->get_notification_manager();
 }
@@ -2314,17 +2328,20 @@ wxString GUI_App::current_language_code_safe() const
 
 void GUI_App::open_web_page_localized(const std::string &http_address)
 {
-    wxLaunchDefaultBrowser(http_address + "&lng=" + this->current_language_code_safe());
+    open_browser_with_warning_dialog(http_address + "&lng=" + this->current_language_code_safe());
 }
 
 bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage start_page)
 {
     wxCHECK_MSG(mainframe != nullptr, false, "Internal error: Main frame not created / null");
 
-    if (reason == ConfigWizard::RR_USER)
-        if (PresetUpdater::UpdateResult result = preset_updater->config_update(app_config->orig_version(), PresetUpdater::UpdateParams::FORCED_BEFORE_WIZARD);
-            result == PresetUpdater::R_ALL_CANCELED)
+    if (reason == ConfigWizard::RR_USER) {
+        wxString header = _L("Updates to Configuration Wizard may cause an another preset selection and lost of preset modification as a result.\n"
+                             "So, check unsaved changes and save them if necessary.") + "\n";
+        if (!check_and_save_current_preset_changes(header, _L("ConfigWizard is opening")) ||
+            preset_updater->config_update(app_config->orig_version(), PresetUpdater::UpdateParams::FORCED_BEFORE_WIZARD) == PresetUpdater::R_ALL_CANCELED)
             return false;
+    }
 
     if (! m_wizard) {
         wxBusyCursor wait;
@@ -2510,6 +2527,23 @@ void GUI_App::check_updates(const bool verbose)
 	catch (const std::exception & ex) {
 		show_error(nullptr, ex.what());
 	}
+}
+
+bool GUI_App::open_browser_with_warning_dialog(const wxString& url, int flags/* = 0*/)
+{
+    bool launch = true;
+
+    if (get_app_config()->get("suppress_hyperlinks").empty()) {
+        wxRichMessageDialog dialog(nullptr, _L("Should we open this hyperlink in your default browser?"), _L("PrusaSlicer: Open hyperlink"), wxICON_QUESTION | wxYES_NO);
+        dialog.ShowCheckBox(_L("Remember my choice"));
+        int answer = dialog.ShowModal();
+        launch = answer == wxID_YES;
+        get_app_config()->set("suppress_hyperlinks", dialog.IsCheckBoxChecked() ? (answer == wxID_NO ? "1" : "0") : "");
+    }
+    if (launch)
+        launch = get_app_config()->get("suppress_hyperlinks") != "1";
+
+    return  launch && wxLaunchDefaultBrowser(url, flags);
 }
 
 // static method accepting a wxWindow object as first parameter

@@ -9,7 +9,6 @@
 
 #include "Format/AMF.hpp"
 #include "Format/OBJ.hpp"
-#include "Format/PRUS.hpp"
 #include "Format/STL.hpp"
 #include "Format/3mf.hpp"
 
@@ -118,8 +117,6 @@ Model Model::read_from_file(const std::string& input_file, DynamicPrintConfig* c
     else if (boost::algorithm::iends_with(input_file, ".3mf"))
         //FIXME options & LoadAttribute::CheckVersion ? 
         result = load_3mf(input_file.c_str(), *config, *config_substitutions, &model, false);
-    else if (boost::algorithm::iends_with(input_file, ".prusa"))
-        result = load_prus(input_file.c_str(), &model);
     else
         throw Slic3r::RuntimeError("Unknown file format. Input file must have .stl, .obj, .amf(.xml) or .prusa extension.");
 
@@ -161,8 +158,10 @@ Model Model::read_from_archive(const std::string& input_file, DynamicPrintConfig
     if (!result)
         throw Slic3r::RuntimeError("Loading of a model file failed.");
 
+#if !ENABLE_SAVE_COMMANDS_ALWAYS_ENABLED
     if (model.objects.empty())
         throw Slic3r::RuntimeError("The supplied file couldn't be read because it's empty");
+#endif // !ENABLE_SAVE_COMMANDS_ALWAYS_ENABLED
 
     for (ModelObject *o : model.objects)
     {
@@ -557,6 +556,21 @@ std::string Model::propose_export_file_name_and_path(const std::string &new_exte
     return boost::filesystem::path(this->propose_export_file_name_and_path()).replace_extension(new_extension).string();
 }
 
+bool Model::is_fdm_support_painted() const
+{
+    return std::any_of(this->objects.cbegin(), this->objects.cend(), [](const ModelObject *mo) { return mo->is_fdm_support_painted(); });
+}
+
+bool Model::is_seam_painted() const
+{
+    return std::any_of(this->objects.cbegin(), this->objects.cend(), [](const ModelObject *mo) { return mo->is_seam_painted(); });
+}
+
+bool Model::is_mm_painted() const
+{
+    return std::any_of(this->objects.cbegin(), this->objects.cend(), [](const ModelObject *mo) { return mo->is_mm_painted(); });
+}
+
 ModelObject::~ModelObject()
 {
     this->clear_volumes();
@@ -731,6 +745,16 @@ void ModelObject::clear_volumes()
         delete v;
     this->volumes.clear();
     this->invalidate_bounding_box();
+}
+
+bool ModelObject::is_fdm_support_painted() const
+{
+    return std::any_of(this->volumes.cbegin(), this->volumes.cend(), [](const ModelVolume *mv) { return mv->is_fdm_support_painted(); });
+}
+
+bool ModelObject::is_seam_painted() const
+{
+    return std::any_of(this->volumes.cbegin(), this->volumes.cend(), [](const ModelVolume *mv) { return mv->is_seam_painted(); });
 }
 
 bool ModelObject::is_mm_painted() const
@@ -956,9 +980,26 @@ void ModelObject::center_around_origin(bool include_modifiers)
 
 void ModelObject::ensure_on_bed(bool allow_negative_z)
 {
-    const double min_z = get_min_z();
-    if (!allow_negative_z || min_z > SINKING_Z_THRESHOLD)
-        translate_instances({ 0.0, 0.0, -min_z });
+    double z_offset = 0.0;
+
+    if (allow_negative_z) {
+        if (parts_count() == 1) {
+            const double min_z = get_min_z();
+            const double max_z = get_max_z();
+            if (min_z >= SINKING_Z_THRESHOLD || max_z < 0.0)
+                z_offset = -min_z;
+        }
+        else {
+            const double max_z = get_max_z();
+            if (max_z < SINKING_MIN_Z_THRESHOLD)
+                z_offset = SINKING_MIN_Z_THRESHOLD - max_z;
+        }
+    }
+    else
+        z_offset = -get_min_z();
+
+    if (z_offset != 0.0)
+        translate_instances(z_offset * Vec3d::UnitZ());
 }
 
 void ModelObject::translate_instances(const Vec3d& vector)
@@ -1110,7 +1151,16 @@ size_t ModelObject::facets_count() const
     size_t num = 0;
     for (const ModelVolume *v : this->volumes)
         if (v->is_model_part())
-            num += v->mesh().stl.stats.number_of_facets;
+            num += v->mesh().facets_count();
+    return num;
+}
+
+size_t ModelObject::parts_count() const
+{
+    size_t num = 0;
+    for (const ModelVolume* v : this->volumes)
+        if (v->is_model_part())
+            ++num;
     return num;
 }
 
@@ -1172,9 +1222,9 @@ ModelObjectPtrs ModelObject::cut(size_t instance, coordf_t z, ModelObjectCutAttr
     for (ModelVolume *volume : volumes) {
         const auto volume_matrix = volume->get_matrix();
 
-        volume->supported_facets.clear();
-        volume->seam_facets.clear();
-        volume->mmu_segmentation_facets.clear();
+        volume->supported_facets.reset();
+        volume->seam_facets.reset();
+        volume->mmu_segmentation_facets.reset();
 
         if (! volume->is_model_part()) {
             // Modifiers are not cut, but we still need to add the instance transformation
@@ -1429,6 +1479,19 @@ double ModelObject::get_min_z() const
     }
 }
 
+double ModelObject::get_max_z() const
+{
+    if (instances.empty())
+        return 0.0;
+    else {
+        double max_z = -DBL_MAX;
+        for (size_t i = 0; i < instances.size(); ++i) {
+            max_z = std::max(max_z, get_instance_max_z(i));
+        }
+        return max_z;
+    }
+}
+
 double ModelObject::get_instance_min_z(size_t instance_idx) const
 {
     double min_z = DBL_MAX;
@@ -1442,12 +1505,33 @@ double ModelObject::get_instance_min_z(size_t instance_idx) const
 
         const Transform3d mv = mi * v->get_matrix();
         const TriangleMesh& hull = v->get_convex_hull();
-		for (const stl_facet &facet : hull.stl.facet_start)
+        for (const stl_triangle_vertex_indices& facet : hull.its.indices)
 			for (int i = 0; i < 3; ++ i)
-				min_z = std::min(min_z, (mv * facet.vertex[i].cast<double>()).z());
+				min_z = std::min(min_z, (mv * hull.its.vertices[facet[i]].cast<double>()).z());
     }
 
     return min_z + inst->get_offset(Z);
+}
+
+double ModelObject::get_instance_max_z(size_t instance_idx) const
+{
+    double max_z = -DBL_MAX;
+
+    const ModelInstance* inst = instances[instance_idx];
+    const Transform3d& mi = inst->get_matrix(true);
+
+    for (const ModelVolume* v : volumes) {
+        if (!v->is_model_part())
+            continue;
+
+        const Transform3d mv = mi * v->get_matrix();
+        const TriangleMesh& hull = v->get_convex_hull();
+        for (const stl_triangle_vertex_indices& facet : hull.its.indices)
+            for (int i = 0; i < 3; ++i)
+                max_z = std::max(max_z, (mv * hull.its.vertices[facet[i]].cast<double>()).z());
+    }
+
+    return max_z + inst->get_offset(Z);
 }
 
 unsigned int ModelObject::check_instances_print_volume_state(const BoundingBoxf3& print_volume)
@@ -1497,27 +1581,27 @@ void ModelObject::print_info() const
     cout << "max_x = " << bb.max(0) << endl;
     cout << "max_y = " << bb.max(1) << endl;
     cout << "max_z = " << bb.max(2) << endl;
-    cout << "number_of_facets = " << mesh.stl.stats.number_of_facets  << endl;
+    cout << "number_of_facets = " << mesh.facets_count() << endl;
     cout << "manifold = "   << (mesh.is_manifold() ? "yes" : "no") << endl;
     
     mesh.repair();  // this calculates number_of_parts
     if (mesh.needed_repair()) {
         mesh.repair();
-        if (mesh.stl.stats.degenerate_facets > 0)
-            cout << "degenerate_facets = "  << mesh.stl.stats.degenerate_facets << endl;
-        if (mesh.stl.stats.edges_fixed > 0)
-            cout << "edges_fixed = "        << mesh.stl.stats.edges_fixed       << endl;
-        if (mesh.stl.stats.facets_removed > 0)
-            cout << "facets_removed = "     << mesh.stl.stats.facets_removed    << endl;
-        if (mesh.stl.stats.facets_added > 0)
-            cout << "facets_added = "       << mesh.stl.stats.facets_added      << endl;
-        if (mesh.stl.stats.facets_reversed > 0)
-            cout << "facets_reversed = "    << mesh.stl.stats.facets_reversed   << endl;
-        if (mesh.stl.stats.backwards_edges > 0)
-            cout << "backwards_edges = "    << mesh.stl.stats.backwards_edges   << endl;
+        if (mesh.stats().degenerate_facets > 0)
+            cout << "degenerate_facets = "  << mesh.stats().degenerate_facets << endl;
+        if (mesh.stats().edges_fixed > 0)
+            cout << "edges_fixed = "        << mesh.stats().edges_fixed       << endl;
+        if (mesh.stats().facets_removed > 0)
+            cout << "facets_removed = "     << mesh.stats().facets_removed    << endl;
+        if (mesh.stats().facets_added > 0)
+            cout << "facets_added = "       << mesh.stats().facets_added      << endl;
+        if (mesh.stats().facets_reversed > 0)
+            cout << "facets_reversed = "    << mesh.stats().facets_reversed   << endl;
+        if (mesh.stats().backwards_edges > 0)
+            cout << "backwards_edges = "    << mesh.stats().backwards_edges   << endl;
     }
-    cout << "number_of_parts =  " << mesh.stl.stats.number_of_parts << endl;
-    cout << "volume = "           << mesh.volume()                  << endl;
+    cout << "number_of_parts =  " << mesh.stats().number_of_parts << endl;
+    cout << "volume = "           << mesh.volume()                << endl;
 }
 
 std::string ModelObject::get_export_filename() const
@@ -1543,7 +1627,7 @@ std::string ModelObject::get_export_filename() const
 stl_stats ModelObject::get_object_stl_stats() const
 {
     if (this->volumes.size() == 1)
-        return this->volumes[0]->mesh().stl.stats;
+        return this->volumes[0]->mesh().stats();
 
     stl_stats full_stats;
     full_stats.volume = 0.f;
@@ -1551,7 +1635,7 @@ stl_stats ModelObject::get_object_stl_stats() const
     // fill full_stats from all objet's meshes
     for (ModelVolume* volume : this->volumes)
     {
-        const stl_stats& stats = volume->mesh().stl.stats;
+        const stl_stats& stats = volume->mesh().stats();
 
         // initialize full_stats (for repaired errors)
         full_stats.degenerate_facets    += stats.degenerate_facets;
@@ -1647,7 +1731,7 @@ void ModelVolume::calculate_convex_hull()
 
 int ModelVolume::get_mesh_errors_count() const
 {
-    const stl_stats& stats = this->mesh().stl.stats;
+    const stl_stats &stats = this->mesh().stats();
 
     return  stats.degenerate_facets + stats.edges_fixed     + stats.facets_removed +
             stats.facets_added      + stats.facets_reversed + stats.backwards_edges;
@@ -1959,11 +2043,11 @@ bool FacetsAnnotation::set(const TriangleSelector& selector)
     return false;
 }
 
-void FacetsAnnotation::clear()
+void FacetsAnnotation::reset()
 {
     m_data.first.clear();
     m_data.second.clear();
-    this->reset_timestamp();
+    this->touch();
 }
 
 // Following function takes data from a triangle and encodes it as string

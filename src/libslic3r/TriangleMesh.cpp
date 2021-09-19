@@ -187,6 +187,10 @@ void TriangleMesh::repair(bool update_shared_vertices)
 
     this->repaired = true;
 
+    //FIXME The admesh repair function may break the face connectivity, rather refresh it here as the slicing code relies on it.
+    if (auto nr_degenerated = this->stl.stats.degenerate_facets; this->facets_count() > 0 && nr_degenerated > 0)
+        stl_check_facets_exact(&this->stl);
+
     BOOST_LOG_TRIVIAL(debug) << "TriangleMesh::repair() finished";
 
     // This call should be quite cheap, a lot of code requires the indexed_triangle_set data structure,
@@ -957,6 +961,48 @@ int its_compactify_vertices(indexed_triangle_set &its, bool shrink_to_fit)
     return removed;
 }
 
+bool its_store_triangle(const indexed_triangle_set &its,
+                        const char *                obj_filename,
+                        size_t                      triangle_index)
+{
+    if (its.indices.size() <= triangle_index) return false;
+    Vec3i                t = its.indices[triangle_index];
+    indexed_triangle_set its2;
+    its2.indices  = {{0, 1, 2}};
+    its2.vertices = {its.vertices[t[0]], its.vertices[t[1]],
+                     its.vertices[t[2]]};
+    return its_write_obj(its2, obj_filename);
+}
+
+bool its_store_triangles(const indexed_triangle_set &its,
+                         const char *                obj_filename,
+                         const std::vector<size_t> & triangles)
+{
+    indexed_triangle_set its2;
+    its2.vertices.reserve(triangles.size() * 3);
+    its2.indices.reserve(triangles.size());
+    std::map<size_t, size_t> vertex_map;
+    for (auto ti : triangles) {
+        if (its.indices.size() <= ti) return false;
+        Vec3i t = its.indices[ti];
+        Vec3i new_t;
+        for (size_t i = 0; i < 3; ++i) {
+            size_t vi = t[i];
+            auto   it = vertex_map.find(vi);
+            if (it != vertex_map.end()) {
+                new_t[i] = it->second;
+                continue;
+            }
+            size_t new_vi = its2.vertices.size();
+            its2.vertices.push_back(its.vertices[vi]);
+            vertex_map[vi] = new_vi;
+            new_t[i]       = new_vi;
+        }
+        its2.indices.push_back(new_t);
+    }
+    return its_write_obj(its2, obj_filename);
+}
+
 void its_shrink_to_fit(indexed_triangle_set &its)
 {
     its.indices.shrink_to_fit();
@@ -1087,15 +1133,17 @@ TriangleMesh make_cylinder(double r, double h, double fa)
     return mesh;
 }
 
-
-TriangleMesh make_cone(double r, double h, double fa)
+indexed_triangle_set its_make_cone(double r, double h, double fa)
 {
-    Pointf3s vertices;
-    std::vector<Vec3i>	facets;
-    vertices.reserve(3+size_t(2*PI/fa));
-    vertices.reserve(3+2*size_t(2*PI/fa));
+    indexed_triangle_set mesh;
+    auto& vertices = mesh.vertices;
+    auto& facets = mesh.indices;
+    vertices.reserve(3 + 2 * size_t(2 * PI / fa));
 
-    vertices = { Vec3d::Zero(), Vec3d(0., 0., h) }; // base center and top vertex
+    // base center and top vertex
+    vertices.emplace_back(Vec3f::Zero());
+    vertices.emplace_back(Vec3f(0., 0., h));
+
     size_t i = 0;
     for (double angle=0; angle<2*PI; angle+=fa) {
         vertices.emplace_back(r*std::cos(angle), r*std::sin(angle), 0.);
@@ -1108,11 +1156,15 @@ TriangleMesh make_cone(double r, double h, double fa)
     facets.emplace_back(0, 2, i+1); // close the shape
     facets.emplace_back(1, i+1, 2);
 
-    TriangleMesh mesh(std::move(vertices), std::move(facets));
-    mesh.repair();
     return mesh;
 }
 
+TriangleMesh make_cone(double radius, double fa)
+{
+    TriangleMesh mesh(its_make_cone(radius, fa));
+    mesh.repair();
+    return mesh;
+}
 
 // Generates mesh for a sphere centered about the origin, using the generated angle
 // to determine the granularity. 
@@ -1176,7 +1228,6 @@ TriangleMesh make_sphere(double radius, double fa)
 {
     TriangleMesh mesh(its_make_sphere(radius, fa));
     mesh.repair();
-
     return mesh;
 }
 
@@ -1233,6 +1284,21 @@ float its_volume(const indexed_triangle_set &its)
     return volume;
 }
 
+float its_average_edge_length(const indexed_triangle_set &its)
+{
+    if (its.indices.empty())
+        return 0.f;
+
+    double edge_length = 0.f;
+    for (size_t i = 0; i < its.indices.size(); ++ i) {
+        const its_triangle v = its_triangle_vertices(its, i);
+        edge_length += (v[1] - v[0]).cast<double>().norm() + 
+                       (v[2] - v[0]).cast<double>().norm() +
+                       (v[1] - v[2]).cast<double>().norm();
+    }
+    return float(edge_length / (3 * its.indices.size()));
+}
+
 std::vector<indexed_triangle_set> its_split(const indexed_triangle_set &its)
 {
     return its_split<>(its);
@@ -1276,6 +1342,15 @@ std::vector<Vec3i> its_face_neighbors(const indexed_triangle_set &its)
 std::vector<Vec3i> its_face_neighbors_par(const indexed_triangle_set &its)
 {
     return create_face_neighbors_index(ex_tbb, its);
+}
+
+std::vector<Vec3f> its_face_normals(const indexed_triangle_set &its) 
+{
+    std::vector<Vec3f> normals;
+    normals.reserve(its.indices.size());
+    for (stl_triangle_vertex_indices face : its.indices)
+        normals.push_back(its_face_normal(its, face));
+    return normals;
 }
 
 } // namespace Slic3r

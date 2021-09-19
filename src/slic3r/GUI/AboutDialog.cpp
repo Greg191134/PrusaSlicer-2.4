@@ -122,7 +122,9 @@ void CopyrightsDialog::fill_entries()
         { "AppImage packaging for Linux using AppImageKit"
                             , "2004-2019 Simon Peter and contributors"      , "https://appimage.org/" },
         { "lib_fts"
-                            , "Forrest Smith"                               , "https://www.forrestthewoods.com/" }
+                            , "Forrest Smith"                               , "https://www.forrestthewoods.com/" },
+        { "fast_float"
+                            , "Daniel Lemire, João Paulo Magalhaes and contributors", "https://github.com/fastfloat/fast_float" }
     };
 }
 
@@ -195,7 +197,7 @@ void CopyrightsDialog::on_dpi_changed(const wxRect &suggested_rect)
 
 void CopyrightsDialog::onLinkClicked(wxHtmlLinkEvent &event)
 {
-    wxLaunchDefaultBrowser(event.GetLinkInfo().GetHref());
+    wxGetApp().open_browser_with_warning_dialog(event.GetLinkInfo().GetHref());
     event.Skip(false);
 }
 
@@ -344,7 +346,7 @@ void AboutDialog::on_dpi_changed(const wxRect &suggested_rect)
 
 void AboutDialog::onLinkClicked(wxHtmlLinkEvent &event)
 {
-    wxLaunchDefaultBrowser(event.GetLinkInfo().GetHref());
+    wxGetApp().open_browser_with_warning_dialog(event.GetLinkInfo().GetHref());
     event.Skip(false);
 }
 

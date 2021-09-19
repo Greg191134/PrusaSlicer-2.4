@@ -22,7 +22,7 @@ static inline void show_notification_extruders_limit_exceeded()
     wxGetApp()
         .plater()
         ->get_notification_manager()
-        ->push_notification(NotificationType::MmSegmentationExceededExtrudersLimit, NotificationManager::NotificationLevel::RegularNotification,
+        ->push_notification(NotificationType::MmSegmentationExceededExtrudersLimit, NotificationManager::NotificationLevel::RegularNotificationLevel,
                             GUI::format(_L("Your printer has more extruders than the multi-material painting gizmo supports. For this reason, only the "
                                            "first %1% extruders will be able to be used for painting."), GLGizmoMmuSegmentation::EXTRUDERS_LIMIT));
 }
@@ -42,7 +42,7 @@ void GLGizmoMmuSegmentation::on_shutdown()
 std::string GLGizmoMmuSegmentation::on_get_name() const
 {
     // FIXME Lukas H.: Discuss and change shortcut
-    return (_L("Multimaterial painting") + " [N]").ToUTF8().data();
+    return _u8L("Multimaterial painting");
 }
 
 bool GLGizmoMmuSegmentation::on_is_selectable() const
@@ -124,13 +124,12 @@ bool GLGizmoMmuSegmentation::on_init()
     m_desc["sphere"]               = _L("Sphere");
     m_desc["pointer"]              = _L("Pointer");
 
-    m_desc["tool_type"]              = _L("Tool type");
+    m_desc["tool_type"]            = _L("Tool type");
     m_desc["tool_brush"]           = _L("Brush");
-    m_desc["tool_seed_fill"]       = _L("Seed fill");
+    m_desc["tool_smart_fill"]      = _L("Smart fill");
     m_desc["tool_bucket_fill"]     = _L("Bucket fill");
 
-    m_desc["seed_fill"]            = _L("Seed fill");
-    m_desc["seed_fill_angle"]      = _L("Seed fill angle");
+    m_desc["smart_fill_angle"]     = _L("Smart fill angle");
 
     init_extruders_data();
 
@@ -240,16 +239,16 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
                             y = std::min(y, bottom_limit - approx_height);
     m_imgui->set_next_window_pos(x, y, ImGuiCond_Always);
 
-    m_imgui->begin(on_get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
+    m_imgui->begin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
 
     // First calculate width of all the texts that are could possibly be shown. We will decide set the dialog width based on that:
     const float clipping_slider_left = std::max(m_imgui->calc_text_size(m_desc.at("clipping_of_view")).x,
                                                 m_imgui->calc_text_size(m_desc.at("reset_direction")).x) + m_imgui->scaled(1.5f);
     const float cursor_slider_left       = m_imgui->calc_text_size(m_desc.at("cursor_size")).x + m_imgui->scaled(1.f);
-    const float seed_fill_slider_left    = m_imgui->calc_text_size(m_desc.at("seed_fill_angle")).x + m_imgui->scaled(1.f);
+    const float smart_fill_slider_left   = m_imgui->calc_text_size(m_desc.at("smart_fill_angle")).x + m_imgui->scaled(1.f);
 
-    const float cursor_type_radio_circle = m_imgui->calc_text_size(m_desc["circle"]).x + m_imgui->scaled(2.5f);
-    const float cursor_type_radio_sphere = m_imgui->calc_text_size(m_desc["sphere"]).x + m_imgui->scaled(2.5f);
+    const float cursor_type_radio_circle  = m_imgui->calc_text_size(m_desc["circle"]).x + m_imgui->scaled(2.5f);
+    const float cursor_type_radio_sphere  = m_imgui->calc_text_size(m_desc["sphere"]).x + m_imgui->scaled(2.5f);
     const float cursor_type_radio_pointer = m_imgui->calc_text_size(m_desc["pointer"]).x + m_imgui->scaled(2.5f);
 
     const float button_width             = m_imgui->calc_text_size(m_desc.at("remove_all")).x + m_imgui->scaled(1.f);
@@ -259,9 +258,9 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
     const float combo_label_width        = std::max(m_imgui->calc_text_size(m_desc.at("first_color")).x,
                                                     m_imgui->calc_text_size(m_desc.at("second_color")).x) + m_imgui->scaled(1.f);
 
-    const float tool_type_radio_brush = m_imgui->calc_text_size(m_desc["tool_brush"]).x + m_imgui->scaled(2.5f);
+    const float tool_type_radio_brush       = m_imgui->calc_text_size(m_desc["tool_brush"]).x + m_imgui->scaled(2.5f);
     const float tool_type_radio_bucket_fill = m_imgui->calc_text_size(m_desc["tool_bucket_fill"]).x + m_imgui->scaled(2.5f);
-    const float tool_type_radio_seed_fill = m_imgui->calc_text_size(m_desc["tool_seed_fill"]).x + m_imgui->scaled(2.5f);
+    const float tool_type_radio_smart_fill  = m_imgui->calc_text_size(m_desc["tool_smart_fill"]).x + m_imgui->scaled(2.5f);
 
     float caption_max    = 0.f;
     float total_text_max = 0.;
@@ -272,12 +271,12 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
     caption_max += m_imgui->scaled(1.f);
     total_text_max += m_imgui->scaled(1.f);
 
-    float sliders_width = std::max(seed_fill_slider_left, std::max(cursor_slider_left, clipping_slider_left));
+    float sliders_width = std::max(smart_fill_slider_left, std::max(cursor_slider_left, clipping_slider_left));
     float window_width = minimal_slider_width + sliders_width;
     window_width       = std::max(window_width, total_text_max);
     window_width       = std::max(window_width, button_width);
     window_width       = std::max(window_width, cursor_type_radio_circle + cursor_type_radio_sphere + cursor_type_radio_pointer);
-    window_width       = std::max(window_width, tool_type_radio_brush + tool_type_radio_bucket_fill + tool_type_radio_seed_fill);
+    window_width       = std::max(window_width, tool_type_radio_brush + tool_type_radio_bucket_fill + tool_type_radio_smart_fill);
     window_width       = std::max(window_width, 2.f * buttons_width + m_imgui->scaled(1.f));
 
     auto draw_text_with_caption = [this, &caption_max](const wxString &caption, const wxString &text) {
@@ -292,6 +291,7 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
     m_imgui->text("");
     ImGui::Separator();
 
+    ImGui::AlignTextToFramePadding();
     m_imgui->text(m_desc.at("first_color"));
     ImGui::SameLine(combo_label_width);
     ImGui::PushItemWidth(window_width - combo_label_width - color_button_width);
@@ -303,6 +303,7 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
     if(ImGui::ColorEdit4("First color##color_picker", (float*)&first_color, ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel))
         m_modified_extruders_colors[m_first_selected_extruder_idx] = {first_color.x, first_color.y, first_color.z, first_color.w};
 
+    ImGui::AlignTextToFramePadding();
     m_imgui->text(m_desc.at("second_color"));
     ImGui::SameLine(combo_label_width);
     ImGui::PushItemWidth(window_width - combo_label_width - color_button_width);
@@ -318,14 +319,12 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
     ImGui::Separator();
 
-    ImGui::AlignTextToFramePadding();
     m_imgui->text(m_desc.at("tool_type"));
 
-    float tool_type_offset = (window_width - tool_type_radio_brush - tool_type_radio_bucket_fill - tool_type_radio_seed_fill + m_imgui->scaled(2.f)) / 2.f;
+    float tool_type_offset = (window_width - tool_type_radio_brush - tool_type_radio_bucket_fill - tool_type_radio_smart_fill + m_imgui->scaled(2.f)) / 2.f;
 
     ImGui::NewLine();
 
-    ImGui::AlignTextToFramePadding();
     ImGui::SameLine(tool_type_offset + m_imgui->scaled(0.f));
     ImGui::PushItemWidth(tool_type_radio_brush);
     if (m_imgui->radio_button(m_desc["tool_brush"], m_tool_type == GLGizmoMmuSegmentation::ToolType::BRUSH)) {
@@ -345,9 +344,9 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
     }
 
     ImGui::SameLine(tool_type_offset + tool_type_radio_brush + m_imgui->scaled(0.f));
-    ImGui::PushItemWidth(tool_type_radio_seed_fill);
-    if (m_imgui->radio_button(m_desc["tool_seed_fill"], m_tool_type == GLGizmoMmuSegmentation::ToolType::SEED_FILL)) {
-        m_tool_type = GLGizmoMmuSegmentation::ToolType::SEED_FILL;
+    ImGui::PushItemWidth(tool_type_radio_smart_fill);
+    if (m_imgui->radio_button(m_desc["tool_smart_fill"], m_tool_type == GLGizmoMmuSegmentation::ToolType::SMART_FILL)) {
+        m_tool_type = GLGizmoMmuSegmentation::ToolType::SMART_FILL;
         for (auto &triangle_selector : m_triangle_selectors) {
             triangle_selector->seed_fill_unselect_all_triangles();
             triangle_selector->request_update_render_data();
@@ -362,7 +361,7 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         ImGui::EndTooltip();
     }
 
-    ImGui::SameLine(tool_type_offset + tool_type_radio_brush + tool_type_radio_seed_fill + m_imgui->scaled(0.f));
+    ImGui::SameLine(tool_type_offset + tool_type_radio_brush + tool_type_radio_smart_fill + m_imgui->scaled(0.f));
     ImGui::PushItemWidth(tool_type_radio_bucket_fill);
     if (m_imgui->radio_button(m_desc["tool_bucket_fill"], m_tool_type == GLGizmoMmuSegmentation::ToolType::BUCKET_FILL)) {
         m_tool_type = GLGizmoMmuSegmentation::ToolType::BUCKET_FILL;
@@ -383,12 +382,10 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
     ImGui::Separator();
 
     if(m_tool_type == ToolType::BRUSH) {
-        ImGui::AlignTextToFramePadding();
         m_imgui->text(m_desc.at("cursor_type"));
         ImGui::NewLine();
 
         float cursor_type_offset = (window_width - cursor_type_radio_sphere - cursor_type_radio_circle - cursor_type_radio_pointer + m_imgui->scaled(2.f)) / 2.f;
-        ImGui::AlignTextToFramePadding();
         ImGui::SameLine(cursor_type_offset + m_imgui->scaled(0.f));
         ImGui::PushItemWidth(cursor_type_radio_sphere);
         if (m_imgui->radio_button(m_desc["sphere"], m_cursor_type == TriangleSelector::CursorType::SPHERE))
@@ -458,14 +455,14 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         m_imgui->disabled_end();
 
         ImGui::Separator();
-    } else if(m_tool_type == ToolType::SEED_FILL) {
-        m_imgui->text(m_desc["seed_fill_angle"] + ":");
+    } else if(m_tool_type == ToolType::SMART_FILL) {
         ImGui::AlignTextToFramePadding();
+        m_imgui->text(m_desc["smart_fill_angle"] + ":");
         std::string format_str = std::string("%.f") + I18N::translate_utf8("°", "Degree sign to use in the respective slider in MMU gizmo,"
                                                                                 "placed after the number with no whitespace in between.");
         ImGui::SameLine(sliders_width);
         ImGui::PushItemWidth(window_width - sliders_width);
-        if(m_imgui->slider_float("##seed_fill_angle", &m_seed_fill_angle, SeedFillAngleMin, SeedFillAngleMax, format_str.data()))
+        if(m_imgui->slider_float("##smart_fill_angle", &m_smart_fill_angle, SmartFillAngleMin, SmartFillAngleMax, format_str.data()))
             for (auto &triangle_selector : m_triangle_selectors) {
                 triangle_selector->seed_fill_unselect_all_triangles();
                 triangle_selector->request_update_render_data();
@@ -630,7 +627,11 @@ void TriangleSelectorMmGui::render(ImGuiWrapper *imgui)
 
         auto *contour_shader = wxGetApp().get_shader("mm_contour");
         contour_shader->start_using();
+
+        glsafe(::glDepthFunc(GL_LEQUAL));
         m_gizmo_scene.render_contour();
+        glsafe(::glDepthFunc(GL_LESS));
+
         contour_shader->stop_using();
     }
 
@@ -724,10 +725,6 @@ void GLMmSegmentationGizmo3DScene::render(size_t triangle_indices_idx) const
     assert(this->triangle_indices_sizes.size() == this->triangle_indices_VBO_ids.size());
     assert(this->vertices_VBO_id != 0);
     assert(this->triangle_indices_VBO_ids[triangle_indices_idx] != 0);
-
-    ScopeGuard offset_fill_guard([]() { glsafe(::glDisable(GL_POLYGON_OFFSET_FILL)); });
-    glsafe(::glEnable(GL_POLYGON_OFFSET_FILL));
-    glsafe(::glPolygonOffset(5.0, 5.0));
 
     glsafe(::glBindBuffer(GL_ARRAY_BUFFER, this->vertices_VBO_id));
     glsafe(::glVertexPointer(3, GL_FLOAT, 3 * sizeof(float), (const void*)(0 * sizeof(float))));

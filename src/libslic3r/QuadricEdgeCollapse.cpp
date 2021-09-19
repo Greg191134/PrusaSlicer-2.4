@@ -7,13 +7,18 @@
 
 using namespace Slic3r;
 
-// only private namespace not neccessary be in hpp
+#ifndef NDEBUG
+//    #define EXPENSIVE_DEBUG_CHECKS
+#endif // NDEBUG
+
+// only private namespace not neccessary be in .hpp
 namespace QuadricEdgeCollapse {
     using Vertices = std::vector<stl_vertex>;
     using Triangle = stl_triangle_vertex_indices;
     using Indices = std::vector<stl_triangle_vertex_indices>;
     using SymMat = SimplifyMesh::implementation::SymetricMatrix<double>;
-
+    using ThrowOnCancel = std::function<void(void)>;
+    using StatusFn = std::function<void(int)>;
     // smallest error caused by edges, identify smallest edge in triangle
     struct Error
     {
@@ -74,12 +79,17 @@ namespace QuadricEdgeCollapse {
     // calculate error for vertex and quadrics, triangle quadrics and triangle vertex give zero, only pozitive number
     double vertex_error(const SymMat &q, const Vec3d &vertex);
     SymMat create_quadric(const Triangle &t, const Vec3d& n, const Vertices &vertices);
-    std::tuple<TriangleInfos, VertexInfos, EdgeInfos, Errors> init(const indexed_triangle_set &its);
+    std::tuple<TriangleInfos, VertexInfos, EdgeInfos, Errors> 
+    init(const indexed_triangle_set &its, ThrowOnCancel& throw_on_cancel, StatusFn& status_fn);
     std::optional<uint32_t> find_triangle_index1(uint32_t vi, const VertexInfo& v_info,
         uint32_t ti, const EdgeInfos& e_infos, const Indices& indices);
+    void reorder_edges(EdgeInfos &e_infos, const VertexInfo &v_info, uint32_t ti0, uint32_t ti1);
     bool is_flipped(const Vec3f &new_vertex, uint32_t ti0, uint32_t ti1, const VertexInfo& v_info, 
         const TriangleInfos &t_infos, const EdgeInfos &e_infos, const indexed_triangle_set &its);
-
+    bool degenerate(uint32_t vi, uint32_t ti0, uint32_t ti1, const VertexInfo &v_info, 
+        const EdgeInfos &e_infos, const Indices &indices);
+    bool create_no_volume(uint32_t vi0, uint32_t vi1, uint32_t ti0, uint32_t ti1,
+        const VertexInfo &v_info0, const VertexInfo &v_info1, const EdgeInfos &e_infos, const Indices &indices);
     // find edge with smallest error in triangle
     Vec3d calculate_3errors(const Triangle &t, const Vertices &vertices, const VertexInfos &v_infos);
     Error calculate_error(uint32_t ti, const Triangle& t,const Vertices &vertices, const VertexInfos& v_infos, unsigned char& min_index);
@@ -88,7 +98,26 @@ namespace QuadricEdgeCollapse {
                           uint32_t vi0, uint32_t vi1, uint32_t vi_top0,
                           const Triangle &t1, CopyEdgeInfos& infos, EdgeInfos &e_infos1);
     void compact(const VertexInfos &v_infos, const TriangleInfos &t_infos, const EdgeInfos &e_infos, indexed_triangle_set &its);
-} // namespace QuadricEdgeCollapse
+
+#ifdef EXPENSIVE_DEBUG_CHECKS
+    void store_surround(const char *obj_filename, size_t triangle_index, int depth, const indexed_triangle_set &its,
+                        const VertexInfos &v_infos, const EdgeInfos &e_infos);
+    bool check_neighbors(const indexed_triangle_set &its, const TriangleInfos &t_infos,
+                         const VertexInfos &v_infos, const EdgeInfos &e_infos);
+#endif /* EXPENSIVE_DEBUG_CHECKS */
+
+    // constants --> may be move to config
+    const uint32_t check_cancel_period = 16; // how many edge to reduce before call throw_on_cancel
+    const size_t max_triangle_count_for_one_vertex = 50;
+    // change speed of progress bargraph
+    const int status_init_size = 10; // in percents
+    // parts of init size
+    const int status_normal_size = 25;
+    const int status_sum_quadric = 25;
+    const int status_set_offsets = 10;
+    const int status_calc_errors = 30;
+    const int status_create_refs = 10;
+    } // namespace QuadricEdgeCollapse
 
 using namespace QuadricEdgeCollapse;
 
@@ -97,26 +126,30 @@ void Slic3r::its_quadric_edge_collapse(
     uint32_t                  triangle_count,
     float *                   max_error,
     std::function<void(void)> throw_on_cancel,
-    std::function<void(int)>  statusfn)
+    std::function<void(int)>  status_fn)
 {
-    // constants --> may be move to config
-    const int status_init_size = 10; // in percents
-    const int check_cancel_period = 16; // how many edge to reduce before call throw_on_cancel
-
     // check input
     if (triangle_count >= its.indices.size()) return;
     float maximal_error = (max_error == nullptr)? std::numeric_limits<float>::max() : *max_error;
     if (maximal_error <= 0.f) return;
     if (throw_on_cancel == nullptr) throw_on_cancel = []() {};
-    if (statusfn == nullptr) statusfn = [](int) {};
+    if (status_fn == nullptr) status_fn = [](int) {};
+
+    StatusFn init_status_fn = [&](int percent) {
+        float n_percent = percent * status_init_size / 100.f;
+        status_fn(static_cast<int>(std::round(n_percent)));
+    };
 
     TriangleInfos t_infos; // only normals with information about deleted triangle
     VertexInfos   v_infos;
     EdgeInfos     e_infos;
     Errors        errors;
-    std::tie(t_infos, v_infos, e_infos, errors) = init(its);
+    std::tie(t_infos, v_infos, e_infos, errors) = init(its, throw_on_cancel, init_status_fn);
     throw_on_cancel();
-    statusfn(status_init_size);
+    status_fn(status_init_size);
+
+    //its_store_triangle(its, "triangle.obj", 1182);
+    //store_surround("triangle_surround1.obj", 1182, 1, its, v_infos, e_infos);
 
     // convert from triangle index to mutable priority queue index
     std::vector<size_t> ti_2_mpqi(its.indices.size(), {0});
@@ -127,7 +160,6 @@ void Slic3r::its_quadric_edge_collapse(
     mpq.reserve(its.indices.size());
     for (Error &error :errors) mpq.push(error);
 
-    const size_t max_triangle_count_for_one_vertex = 50;
     CopyEdgeInfos ceis;
     ceis.reserve(max_triangle_count_for_one_vertex);
     EdgeInfos e_infos_swap;
@@ -142,10 +174,11 @@ void Slic3r::its_quadric_edge_collapse(
                          (double) count_triangle_to_reduce;
         double status = status_init_size + (100 - status_init_size) *
                         (1. - reduced);            
-        statusfn(static_cast<int>(std::round(status)));
+        status_fn(static_cast<int>(std::round(status)));
     };
-    // modulo for update status
-    uint32_t status_mod = std::max(uint32_t(16), count_triangle_to_reduce / 100);
+    // modulo for update status, call each percent only once
+    uint32_t status_mod = std::max(uint32_t(16), 
+        count_triangle_to_reduce / (100 - status_init_size));
 
     uint32_t iteration_number = 0;
     float last_collapsed_error = 0.f;
@@ -177,12 +210,21 @@ void Slic3r::its_quadric_edge_collapse(
         q += v_info1.q;
         Vec3f new_vertex0 = calculate_vertex(vi0, vi1, q, its.vertices);
         // set of triangle indices that change quadric
+        uint32_t ti1 = -1; // triangle 1 index
         auto ti1_opt = (v_info0.count < v_info1.count)?
             find_triangle_index1(vi1, v_info0, ti0, e_infos, its.indices) :
             find_triangle_index1(vi0, v_info1, ti0, e_infos, its.indices) ;
+        if (ti1_opt.has_value()) { 
+            ti1 = *ti1_opt;
+            reorder_edges(e_infos, v_info0, ti0, ti1);
+            reorder_edges(e_infos, v_info1, ti0, ti1);
+        }
         if (!ti1_opt.has_value() || // edge has only one triangle
-            is_flipped(new_vertex0, ti0, *ti1_opt, v_info0, t_infos, e_infos, its) ||
-            is_flipped(new_vertex0, ti0, *ti1_opt, v_info1, t_infos, e_infos, its)) {
+            degenerate(vi0, ti0, ti1, v_info1, e_infos, its.indices) ||
+            degenerate(vi1, ti0, ti1, v_info0, e_infos, its.indices) ||
+            create_no_volume(vi0, vi1, ti0, ti1, v_info0, v_info1, e_infos, its.indices) ||
+            is_flipped(new_vertex0, ti0, ti1, v_info0, t_infos, e_infos, its) ||
+            is_flipped(new_vertex0, ti0, ti1, v_info1, t_infos, e_infos, its)) {
             // try other triangle's edge
             Vec3d errors = calculate_3errors(t0, its.vertices, v_infos);
             Vec3i ord = (errors[0] < errors[1]) ? 
@@ -207,37 +249,32 @@ void Slic3r::its_quadric_edge_collapse(
             mpq.push(e);
             continue;
         }
-        uint32_t ti1 = *ti1_opt;
+        
         last_collapsed_error = e.value;
         changed_triangle_indices.clear();
         changed_triangle_indices.reserve(v_info0.count + v_info1.count - 4);
         
         // for each vertex0 triangles
-        uint32_t v_info0_end = v_info0.start + v_info0.count;
+        uint32_t v_info0_end = v_info0.start + v_info0.count - 2;
         for (uint32_t di = v_info0.start; di < v_info0_end; ++di) {
             assert(di < e_infos.size());
             uint32_t    ti     = e_infos[di].t_index;
-            if (ti == ti0) continue; // ti0 will be deleted
-            if (ti == ti1) continue; // ti1 will be deleted
             changed_triangle_indices.emplace_back(ti);
         }
 
         // for each vertex1 triangles
-        uint32_t v_info1_end = v_info1.start + v_info1.count;
+        uint32_t v_info1_end = v_info1.start + v_info1.count - 2;
         for (uint32_t di = v_info1.start; di < v_info1_end; ++di) {
             assert(di < e_infos.size());
             EdgeInfo &e_info = e_infos[di];
             uint32_t    ti     = e_info.t_index;
-            if (ti == ti0) continue; // ti0 will be deleted
-            if (ti == ti1) continue; // ti1 will be deleted
             Triangle &t = its.indices[ti];
             t[e_info.edge] = vi0; // change index
             changed_triangle_indices.emplace_back(ti);
         }
         v_info0.q = q;
 
-        // fix neighbors
-        
+        // fix neighbors      
         // vertex index of triangle 0 which is not vi0 nor vi1
         uint32_t vi_top0 = t0[(t_info0.min_index + 2) % 3];
         const Triangle &t1 = its.indices[ti1];
@@ -263,6 +300,9 @@ void Slic3r::its_quadric_edge_collapse(
         t_info1.set_deleted();
         // triangle counter decrementation
         actual_triangle_count-=2;
+#ifdef EXPENSIVE_DEBUG_CHECKS
+        assert(check_neighbors(its, t_infos, v_infos, e_infos));
+#endif // EXPENSIVE_DEBUG_CHECKS
     }
 
     // compact triangle
@@ -362,8 +402,9 @@ SymMat QuadricEdgeCollapse::create_quadric(const Triangle &t,
 }
 
 std::tuple<TriangleInfos, VertexInfos, EdgeInfos, Errors> 
-QuadricEdgeCollapse::init(const indexed_triangle_set &its)
+QuadricEdgeCollapse::init(const indexed_triangle_set &its, ThrowOnCancel& throw_on_cancel, StatusFn& status_fn)
 {
+    int status_offset = 0;
     TriangleInfos t_infos(its.indices.size());
     VertexInfos   v_infos(its.vertices.size());
     {
@@ -377,8 +418,13 @@ QuadricEdgeCollapse::init(const indexed_triangle_set &its)
                 Vec3d           normal = create_normal(t, its.vertices);
                 t_info.n = normal.cast<float>();
                 triangle_quadrics[i] = create_quadric(t, normal, its.vertices);
+                if (i % 1000000 == 0) {
+                    throw_on_cancel();
+                    status_fn(status_offset + (i * status_normal_size) / its.indices.size());
+                }
             }
         }); // END parallel for
+        status_offset += status_normal_size;
 
         // sum quadrics
         for (size_t i = 0; i < its.indices.size(); i++) {
@@ -389,7 +435,12 @@ QuadricEdgeCollapse::init(const indexed_triangle_set &its)
                 v_info.q += q;
                 ++v_info.count; // triangle count
             }
+            if (i % 1000000 == 0) {
+                throw_on_cancel();
+                status_fn(status_offset + (i * status_sum_quadric) / its.indices.size());
+            }
         }
+        status_offset += status_sum_quadric;
     } // remove triangle quadrics
 
     // set offseted starts
@@ -402,6 +453,10 @@ QuadricEdgeCollapse::init(const indexed_triangle_set &its)
     }
     assert(its.indices.size() * 3 == triangle_start);
 
+    status_offset += status_set_offsets;
+    throw_on_cancel();
+    status_fn(status_offset);
+
     // calc error
     Errors errors(its.indices.size());
     tbb::parallel_for(tbb::blocked_range<size_t>(0, its.indices.size()),
@@ -410,8 +465,15 @@ QuadricEdgeCollapse::init(const indexed_triangle_set &its)
             const Triangle &t      = its.indices[i];
             TriangleInfo &  t_info = t_infos[i];
             errors[i] = calculate_error(i, t, its.vertices, v_infos, t_info.min_index);
+            if (i % 1000000 == 0) {
+                throw_on_cancel();
+                status_fn(status_offset + (i * status_calc_errors) / its.indices.size());
+            }
+            if (i % 1000000 == 0) throw_on_cancel();
         }
     }); // END parallel for
+
+    status_offset += status_calc_errors;
     
     // create reference
     EdgeInfos e_infos(its.indices.size() * 3);
@@ -426,7 +488,14 @@ QuadricEdgeCollapse::init(const indexed_triangle_set &its)
             e_info.edge      = j;
             ++v_info.count;
         }
+        if (i % 1000000 == 0) {
+            throw_on_cancel();
+            status_fn(status_offset + (i * status_create_refs) / its.indices.size());
+        }
     }
+
+    throw_on_cancel();
+    status_fn(100);
     return {t_infos, v_infos, e_infos, errors};
 }
 
@@ -450,6 +519,38 @@ std::optional<uint32_t> QuadricEdgeCollapse::find_triangle_index1(uint32_t      
     return {};
 }
 
+void QuadricEdgeCollapse::reorder_edges(EdgeInfos &       e_infos,
+                                        const VertexInfo &v_info,
+                                        uint32_t          ti0,
+                                        uint32_t          ti1)
+{
+    // swap edge info of ti0 and ti1 to end(last one and one before)
+    size_t v_info_end = v_info.start + v_info.count - 2;
+    EdgeInfo &e_info_ti0 = e_infos[v_info_end]; 
+    EdgeInfo &e_info_ti1 = e_infos[v_info_end+1]; 
+    bool      is_swaped  = false;
+    for (size_t ei = v_info.start; ei < v_info_end; ++ei) {
+        EdgeInfo &e_info = e_infos[ei];
+        if (e_info.t_index == ti0) {
+            std::swap(e_info, e_info_ti0);
+            if (is_swaped) return;
+            if (e_info.t_index == ti1) { 
+                std::swap(e_info, e_info_ti1);
+                return;
+            }
+            is_swaped = true;
+        } else if (e_info.t_index == ti1) {
+            std::swap(e_info, e_info_ti1);
+            if (is_swaped) return;
+            if (e_info.t_index == ti0) {
+                std::swap(e_info, e_info_ti0);
+                return;
+            }
+            is_swaped = true;
+        }
+    }
+}
+
 bool QuadricEdgeCollapse::is_flipped(const Vec3f &               new_vertex,
                                      uint32_t                    ti0,
                                      uint32_t                    ti1,
@@ -463,12 +564,10 @@ bool QuadricEdgeCollapse::is_flipped(const Vec3f &               new_vertex,
     static const float dot_thr = 0.2f; // Value from simplify mesh cca 80 DEG
 
     // for each vertex triangles
-    size_t v_info_end = v_info.start + v_info.count;
+    size_t v_info_end = v_info.start + v_info.count-2;
     for (size_t ei = v_info.start; ei < v_info_end; ++ei) {
         assert(ei < e_infos.size());
         const EdgeInfo &e_info = e_infos[ei];
-        if (e_info.t_index == ti0) continue; // ti0 will be deleted
-        if (e_info.t_index == ti1) continue; // ti1 will be deleted
         const Triangle &t      = its.indices[e_info.t_index];
         const Vec3f &normal = t_infos[e_info.t_index].n;
         const Vec3f &vf     = its.vertices[t[(e_info.edge + 1) % 3]];
@@ -485,6 +584,72 @@ bool QuadricEdgeCollapse::is_flipped(const Vec3f &               new_vertex,
         Vec3f n = d1.cross(d2);
         n.normalize(); 
         if(n.dot(normal) < dot_thr) return true;
+    }
+    return false;
+}
+
+bool QuadricEdgeCollapse::degenerate(uint32_t          vi,
+                                     uint32_t          ti0,
+                                     uint32_t          ti1,
+                                     const VertexInfo &v_info,
+                                     const EdgeInfos & e_infos,
+                                     const Indices &   indices)
+{
+    // check surround triangle do not contain vertex index
+    // protect from creation of triangle with two same vertices inside
+    size_t v_info_end = v_info.start + v_info.count - 2;
+    for (size_t ei = v_info.start; ei < v_info_end; ++ei) {
+        assert(ei < e_infos.size());
+        const EdgeInfo &e_info = e_infos[ei];
+        const Triangle &t = indices[e_info.t_index];
+        for (size_t i = 0; i < 3; ++i)
+            if (static_cast<uint32_t>(t[i]) == vi) return true;
+    }
+    return false;
+}
+
+bool QuadricEdgeCollapse::create_no_volume(
+    uint32_t          vi0    , uint32_t          vi1,
+    uint32_t          ti0    , uint32_t          ti1,
+    const VertexInfo &v_info0, const VertexInfo &v_info1,
+    const EdgeInfos & e_infos, const Indices &indices)
+{
+    // check that triangles around vertex0 doesn't have half edge
+    // with opposit order in set of triangles around vertex1
+    // protect from creation of two triangles with oposit order - no volume space
+    size_t v_info0_end = v_info0.start + v_info0.count - 2;
+    size_t v_info1_end = v_info1.start + v_info1.count - 2;
+    for (size_t ei0 = v_info0.start; ei0 < v_info0_end; ++ei0) {
+        const EdgeInfo &e_info0 = e_infos[ei0];
+        const Triangle &t0 = indices[e_info0.t_index];
+        // edge CCW vertex indices are t0vi0, t0vi1
+        size_t t0i = 0;
+        uint32_t t0vi0 = static_cast<uint32_t>(t0[t0i]);
+        if (t0vi0 == vi0) { 
+            ++t0i; 
+            t0vi0 = static_cast<uint32_t>(t0[t0i]);
+        }
+        ++t0i;
+        uint32_t t0vi1 = static_cast<uint32_t>(t0[t0i]);
+        if (t0vi1 == vi0) { 
+            ++t0i;
+            t0vi1 = static_cast<uint32_t>(t0[t0i]);
+        }
+        for (size_t ei1 = v_info1.start; ei1 < v_info1_end; ++ei1) {
+            const EdgeInfo &e_info1 = e_infos[ei1];
+            const Triangle &t1 = indices[e_info1.t_index];
+            size_t t1i = 0;
+            for (; t1i < 3; ++t1i) if (static_cast<uint32_t>(t1[t1i]) == t0vi1) break;            
+            if (t1i >= 3) continue; // without vertex index from triangle 0
+            // check if second index is same too
+            ++t1i;
+            if (t1i == 3) t1i = 0; // triangle loop(modulo 3)
+            if (static_cast<uint32_t>(t1[t1i]) == vi1) { 
+                ++t1i; 
+                if (t1i == 3) t1i = 0; // triangle loop(modulo 3)
+            }
+            if (static_cast<uint32_t>(t1[t1i]) == t0vi0) return true;
+        }
     }
     return false;
 }
@@ -653,3 +818,116 @@ void QuadricEdgeCollapse::compact(const VertexInfos &   v_infos,
     }
     its.indices.erase(its.indices.begin() + ti_new, its.indices.end());
 }
+
+#ifdef EXPENSIVE_DEBUG_CHECKS
+
+// store triangle surrounding to file
+void QuadricEdgeCollapse::store_surround(const char *obj_filename,
+                                         size_t      triangle_index,
+                                         int         depth,
+                                         const indexed_triangle_set &its,
+                                         const VertexInfos &         v_infos,
+                                         const EdgeInfos &           e_infos)
+{
+    std::set<size_t> triangles;
+    //             triangle index, depth
+    using Item = std::pair<size_t, int>;
+    std::queue<Item> process;
+    process.push({triangle_index, depth});
+
+    while (!process.empty()) {
+        Item item = process.front();
+        process.pop();
+        size_t ti = item.first;
+        auto   it = triangles.find(ti);
+        if (it != triangles.end()) continue;
+        triangles.insert(ti);
+        if (item.second == 0) continue;
+
+        const Vec3i &t = its.indices[ti];
+        for (size_t i = 0; i < 3; ++i) {
+            const auto &v_info = v_infos[t[i]];
+            for (size_t d = 0; d < v_info.count; ++d) {
+                size_t      ei     = v_info.start + d;
+                const auto &e_info = e_infos[ei];
+                auto        it     = triangles.find(e_info.t_index);
+                if (it != triangles.end()) continue;
+                process.push({e_info.t_index, item.second - 1});
+            }
+        }
+    }
+
+    std::vector<size_t> trs;
+    trs.reserve(triangles.size());
+    for (size_t ti : triangles) trs.push_back(ti);
+    its_store_triangles(its, obj_filename, trs);
+    // its_write_obj(its,"original.obj");
+}
+
+bool QuadricEdgeCollapse::check_neighbors(const indexed_triangle_set &its,
+                                          const TriangleInfos &       t_infos,
+                                          const VertexInfos &         v_infos,
+                                          const EdgeInfos &           e_infos)
+{
+    VertexInfos v_infos2(v_infos.size());
+    size_t      count_indices = 0;
+
+    for (size_t ti = 0; ti < its.indices.size(); ti++) {
+        if (t_infos[ti].is_deleted()) continue;
+        ++count_indices;
+        const Triangle &t = its.indices[ti];
+        for (size_t e = 0; e < 3; e++) {
+            VertexInfo &v_info = v_infos2[t[e]];
+            ++v_info.count; // triangle count
+        }
+    }
+
+    uint32_t triangle_start = 0;
+    for (VertexInfo &v_info : v_infos2) {
+        v_info.start = triangle_start;
+        triangle_start += v_info.count;
+        // set filled vertex to zero
+        v_info.count = 0;
+    }
+
+    // create reference
+    EdgeInfos e_infos2(count_indices * 3);
+    for (size_t ti = 0; ti < its.indices.size(); ti++) {
+        if (t_infos[ti].is_deleted()) continue;
+        const Triangle &t = its.indices[ti];
+        for (size_t j = 0; j < 3; ++j) {
+            VertexInfo &v_info = v_infos2[t[j]];
+            size_t      ei     = v_info.start + v_info.count;
+            assert(ei < e_infos2.size());
+            EdgeInfo &e_info = e_infos2[ei];
+            e_info.t_index   = ti;
+            e_info.edge      = j;
+            ++v_info.count;
+        }
+    }
+
+    for (size_t vi = 0; vi < its.vertices.size(); vi++) {
+        const VertexInfo &v_info = v_infos[vi];
+        if (v_info.is_deleted()) continue;
+        const VertexInfo &v_info2 = v_infos2[vi];
+        if (v_info.count != v_info2.count) { return false; }
+        EdgeInfos eis;
+        eis.reserve(v_info.count);
+        std::copy(e_infos.begin() + v_info.start,
+                  e_infos.begin() + v_info.start + v_info.count,
+                  std::back_inserter(eis));
+        auto compare = [](const EdgeInfo &ei1, const EdgeInfo &ei2) {
+            return ei1.t_index < ei2.t_index;
+        };
+        std::sort(eis.begin(), eis.end(), compare);
+        std::sort(e_infos2.begin() + v_info2.start,
+                  e_infos2.begin() + v_info2.start + v_info2.count, compare);
+        for (size_t ei = 0; ei < v_info.count; ++ei) {
+            if (eis[ei].t_index != e_infos2[ei + v_info2.start].t_index) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+#endif /* EXPENSIVE_DEBUG_CHECKS */

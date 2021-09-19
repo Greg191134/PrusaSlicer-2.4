@@ -7,9 +7,7 @@
 
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Model.hpp"
-#if ENABLE_SINKING_CONTOURS
 #include "libslic3r/Polygon.hpp"
-#endif // ENABLE_SINKING_CONTOURS
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -18,6 +16,26 @@
 
 namespace Slic3r {
 namespace GUI {
+
+#if ENABLE_SEAMS_USING_BATCHED_MODELS
+size_t GLModel::InitializationData::vertices_count() const
+{
+    size_t ret = 0;
+    for (const Entity& entity : entities) {
+        ret += entity.positions.size();
+    }
+    return ret;
+}
+
+size_t GLModel::InitializationData::indices_count() const
+{
+    size_t ret = 0;
+    for (const Entity& entity : entities) {
+        ret += entity.indices.size();
+    }
+    return ret;
+}
+#endif // ENABLE_SEAMS_USING_BATCHED_MODELS
 
 void GLModel::init_from(const InitializationData& data)
 {
@@ -58,7 +76,7 @@ void GLModel::init_from(const InitializationData& data)
     }
 }
 
-void GLModel::init_from(const TriangleMesh& mesh)
+void GLModel::init_from(const indexed_triangle_set& its, const BoundingBoxf3 &bbox)
 {
     if (!m_render_data.empty()) // call reset() if you want to reuse this model
         return;
@@ -66,31 +84,36 @@ void GLModel::init_from(const TriangleMesh& mesh)
     RenderData data;
     data.type = PrimitiveType::Triangles;
 
-    std::vector<float> vertices = std::vector<float>(18 * mesh.stl.stats.number_of_facets);
-    std::vector<unsigned int> indices = std::vector<unsigned int>(3 * mesh.stl.stats.number_of_facets);
+    std::vector<float> vertices = std::vector<float>(18 * its.indices.size());
+    std::vector<unsigned int> indices = std::vector<unsigned int>(3 * its.indices.size());
 
     unsigned int vertices_count = 0;
-    for (uint32_t i = 0; i < mesh.stl.stats.number_of_facets; ++i) {
-        const stl_facet& facet = mesh.stl.facet_start[i];
-        for (size_t j = 0; j < 3; ++j) {
+    for (uint32_t i = 0; i < its.indices.size(); ++i) {
+        stl_triangle_vertex_indices face      = its.indices[i];
+        stl_vertex                  vertex[3] = { its.vertices[face[0]], its.vertices[face[1]], its.vertices[face[2]] };
+        stl_vertex                  n         = face_normal_normalized(vertex);
+        for (size_t j = 0; j < 3; ++ j) {
             size_t offset = i * 18 + j * 6;
-            ::memcpy(static_cast<void*>(&vertices[offset]), static_cast<const void*>(facet.vertex[j].data()), 3 * sizeof(float));
-            ::memcpy(static_cast<void*>(&vertices[3 + offset]), static_cast<const void*>(facet.normal.data()), 3 * sizeof(float));
+            ::memcpy(static_cast<void*>(&vertices[offset]), static_cast<const void*>(vertex[j].data()), 3 * sizeof(float));
+            ::memcpy(static_cast<void*>(&vertices[3 + offset]), static_cast<const void*>(n.data()), 3 * sizeof(float));
         }
-        for (size_t j = 0; j < 3; ++j) {
+        for (size_t j = 0; j < 3; ++j)
             indices[i * 3 + j] = vertices_count + j;
-        }
         vertices_count += 3;
     }
 
     data.indices_count = static_cast<unsigned int>(indices.size());
-    m_bounding_box = mesh.bounding_box();
+    m_bounding_box = bbox;
 
     send_to_gpu(data, vertices, indices);
     m_render_data.emplace_back(data);
 }
 
-#if ENABLE_SINKING_CONTOURS
+void GLModel::init_from(const indexed_triangle_set& its)
+{
+    this->init_from(its, bounding_box(its));
+}
+
 void GLModel::init_from(const Polygons& polygons, float z)
 {
     auto append_polygon = [](const Polygon& polygon, float z, GUI::GLModel::InitializationData& data) {
@@ -117,7 +140,6 @@ void GLModel::init_from(const Polygons& polygons, float z)
     }
     init_from(init_data);
 }
-#endif // ENABLE_SINKING_CONTOURS
 
 bool GLModel::init_from_file(const std::string& filename)
 {
@@ -137,7 +159,9 @@ bool GLModel::init_from_file(const std::string& filename)
         return false;
     }
 
-    init_from(model.mesh());
+    TriangleMesh mesh = model.mesh();
+    mesh.require_shared_vertices();
+    init_from(mesh.its, mesh.bounding_box());
 
     m_filename = filename;
 
@@ -207,6 +231,85 @@ void GLModel::render() const
         glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
     }
 }
+
+#if ENABLE_SEAMS_USING_MODELS
+void GLModel::render_instanced(unsigned int instances_vbo, unsigned int instances_count) const
+{
+    if (instances_vbo == 0)
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_current_shader();
+    assert(shader == nullptr || boost::algorithm::iends_with(shader->get_name(), "_instanced"));
+
+    // vertex attributes
+    GLint position_id = (shader != nullptr) ? shader->get_attrib_location("v_position") : -1;
+    GLint normal_id = (shader != nullptr) ? shader->get_attrib_location("v_normal") : -1;
+    assert(position_id != -1 && normal_id != -1);
+
+    // instance attributes
+    GLint offset_id = (shader != nullptr) ? shader->get_attrib_location("i_offset") : -1;
+    GLint scales_id = (shader != nullptr) ? shader->get_attrib_location("i_scales") : -1;
+    assert(offset_id != -1 && scales_id != -1);
+
+    glsafe(::glBindBuffer(GL_ARRAY_BUFFER, instances_vbo));
+    if (offset_id != -1) {
+        glsafe(::glVertexAttribPointer(offset_id, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (GLvoid*)0));
+        glsafe(::glEnableVertexAttribArray(offset_id));
+        glsafe(::glVertexAttribDivisor(offset_id, 1));
+    }
+    if (scales_id != -1) {
+        glsafe(::glVertexAttribPointer(scales_id, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (GLvoid*)(3 * sizeof(float))));
+        glsafe(::glEnableVertexAttribArray(scales_id));
+        glsafe(::glVertexAttribDivisor(scales_id, 1));
+    }
+
+    for (const RenderData& data : m_render_data) {
+        if (data.vbo_id == 0 || data.ibo_id == 0)
+            continue;
+
+        GLenum mode;
+        switch (data.type)
+        {
+        default:
+        case PrimitiveType::Triangles: { mode = GL_TRIANGLES; break; }
+        case PrimitiveType::Lines:     { mode = GL_LINES; break; }
+        case PrimitiveType::LineStrip: { mode = GL_LINE_STRIP; break; }
+        case PrimitiveType::LineLoop:  { mode = GL_LINE_LOOP; break; }
+        }
+
+        if (shader != nullptr)
+            shader->set_uniform("uniform_color", data.color);
+        else
+            glsafe(::glColor4fv(data.color.data()));
+
+        glsafe(::glBindBuffer(GL_ARRAY_BUFFER, data.vbo_id));
+        if (position_id != -1) {
+            glsafe(::glVertexAttribPointer(position_id, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (GLvoid*)0));
+            glsafe(::glEnableVertexAttribArray(position_id));
+        }
+        if (normal_id != -1) {
+            glsafe(::glVertexAttribPointer(normal_id, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (GLvoid*)(3 * sizeof(float))));
+            glsafe(::glEnableVertexAttribArray(normal_id));
+        }
+
+        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, data.ibo_id));
+        glsafe(::glDrawElementsInstanced(mode, static_cast<GLsizei>(data.indices_count), GL_UNSIGNED_INT, (const void*)0, instances_count));
+        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
+
+        if (normal_id != -1)
+            glsafe(::glDisableVertexAttribArray(normal_id));
+        if (position_id != -1)
+            glsafe(::glDisableVertexAttribArray(position_id));
+    }
+
+    if (scales_id != -1)
+        glsafe(::glDisableVertexAttribArray(scales_id));
+    if (offset_id != -1)
+        glsafe(::glDisableVertexAttribArray(offset_id));
+
+    glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
+}
+#endif // ENABLE_SEAMS_USING_MODELS
 
 void GLModel::send_to_gpu(RenderData& data, const std::vector<float>& vertices, const std::vector<unsigned int>& indices)
 {
@@ -593,6 +696,54 @@ GLModel::InitializationData straight_arrow(float tip_width, float tip_height, fl
         append_indices(entity, 14 + ii, 15 + ii, 17 + ii);
         append_indices(entity, 14 + ii, 17 + ii, 16 + ii);
     }
+
+    data.entities.emplace_back(entity);
+    return data;
+}
+
+GLModel::InitializationData diamond(int resolution)
+{
+    resolution = std::max(4, resolution);
+
+    GLModel::InitializationData data;
+    GLModel::InitializationData::Entity entity;
+    entity.type = GLModel::PrimitiveType::Triangles;
+
+    const float step = 2.0f * float(PI) / float(resolution);
+
+    // positions
+    for (int i = 0; i < resolution; ++i) {
+        float ii = float(i) * step;
+        entity.positions.emplace_back(0.5f * ::cos(ii), 0.5f * ::sin(ii), 0.0f);
+    }
+    entity.positions.emplace_back(0.0f, 0.0f, 0.5f);
+    entity.positions.emplace_back(0.0f, 0.0f, -0.5f);
+
+    // normals
+    for (const Vec3f& v : entity.positions) {
+        entity.normals.emplace_back(v.normalized());
+    }
+
+    // triangles
+    // top
+    for (int i = 0; i < resolution; ++i) {
+        entity.indices.push_back(i + 0);
+        entity.indices.push_back(i + 1);
+        entity.indices.push_back(resolution);
+    }
+    entity.indices.push_back(resolution - 1);
+    entity.indices.push_back(0);
+    entity.indices.push_back(resolution);
+
+    // bottom
+    for (int i = 0; i < resolution; ++i) {
+        entity.indices.push_back(i + 0);
+        entity.indices.push_back(resolution + 1);
+        entity.indices.push_back(i + 1);
+    }
+    entity.indices.push_back(resolution - 1);
+    entity.indices.push_back(resolution + 1);
+    entity.indices.push_back(0);
 
     data.entities.emplace_back(entity);
     return data;

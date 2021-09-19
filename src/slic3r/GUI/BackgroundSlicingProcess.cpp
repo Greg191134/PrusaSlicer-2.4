@@ -209,8 +209,8 @@ void BackgroundSlicingProcess::process_sla()
 
 void BackgroundSlicingProcess::thread_proc()
 {
-    set_current_thread_name("slic3r_BgSlcPcs");
-	name_tbb_thread_pool_threads();
+	set_current_thread_name("slic3r_BgSlcPcs");
+    name_tbb_thread_pool_threads_set_locale();
 
 	assert(m_print != nullptr);
 	assert(m_print == m_fff_print || m_print == m_sla_print);
@@ -574,11 +574,8 @@ Print::ApplyStatus BackgroundSlicingProcess::apply(const Model &model, const Dyn
 		// Some FFF status was invalidated, and the G-code was not exported yet.
 		// Let the G-code preview UI know that the final G-code preview is not valid.
 		// In addition, this early memory deallocation reduces memory footprint.
-		if (m_gcode_result != nullptr) {
-			//FIXME calling platter from here is not a staple of a good architecture.
-			GUI::wxGetApp().plater()->stop_mapping_gcode_window();
+		if (m_gcode_result != nullptr)
 			m_gcode_result->reset();
-		}
 	}
 	return invalidated;
 }

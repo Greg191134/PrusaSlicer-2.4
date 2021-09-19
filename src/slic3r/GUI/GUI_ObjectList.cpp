@@ -19,6 +19,7 @@
 #include "Selection.hpp"
 #include "format.hpp"
 #include "NotificationManager.hpp"
+#include "MsgDialog.hpp"
 
 #include <boost/algorithm/string.hpp>
 #include <wx/progdlg.h>
@@ -369,7 +370,7 @@ void ObjectList::get_selection_indexes(std::vector<int>& obj_idxs, std::vector<i
         }
     }
 
-    std::sort(obj_idxs.begin(), obj_idxs.end(), std::greater<int>());
+    std::sort(obj_idxs.begin(), obj_idxs.end(), std::less<int>());
     obj_idxs.erase(std::unique(obj_idxs.begin(), obj_idxs.end()), obj_idxs.end());
 }
 
@@ -393,7 +394,7 @@ wxString ObjectList::get_mesh_errors_list(const int obj_idx, const int vol_idx /
 
     const stl_stats& stats = vol_idx == -1 ?
                             (*m_objects)[obj_idx]->get_object_stl_stats() :
-                            (*m_objects)[obj_idx]->volumes[vol_idx]->mesh().stl.stats;
+                            (*m_objects)[obj_idx]->volumes[vol_idx]->mesh().stats();
 
     if (stats.degenerate_facets > 0)
         tooltip += "\t" + format_wxstr(_L_PLURAL("%1$d degenerate facet", "%1$d degenerate facets", stats.degenerate_facets), stats.degenerate_facets) + "\n";
@@ -1044,13 +1045,8 @@ void ObjectList::key_event(wxKeyEvent& event)
 {
     if (event.GetKeyCode() == WXK_TAB)
         Navigate(event.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward);
-    else if (event.GetKeyCode() == WXK_DELETE
-#ifdef __WXOSX__
-        || event.GetKeyCode() == WXK_BACK
-#endif //__WXOSX__
-        ) {
+    else if (event.GetKeyCode() == WXK_DELETE || event.GetKeyCode() == WXK_BACK )
         remove();
-    }
     else if (event.GetKeyCode() == WXK_F5)
         wxGetApp().plater()->reload_all_from_disk();
     else if (wxGetKeyState(wxKeyCode('A')) && wxGetKeyState(WXK_CONTROL/*WXK_SHIFT*/))
@@ -1702,8 +1698,7 @@ void ObjectList::load_shape_object_from_gallery(const wxArrayString& input_files
         snapshot_label += ", " + wxString::FromUTF8(paths[i].filename().string().c_str());
 
     take_snapshot(snapshot_label);
-    std::vector<size_t> res = wxGetApp().plater()->load_files(paths, true, false);
-    if (!res.empty())
+    if (! wxGetApp().plater()->load_files(paths, true, false).empty())
         wxGetApp().mainframe->update_title();
 }
 
@@ -1803,21 +1798,21 @@ void ObjectList::del_info_item(const int obj_idx, InfoItemType type)
         cnv->get_gizmos_manager().reset_all_states();
         Plater::TakeSnapshot(plater, _L("Remove paint-on supports"));
         for (ModelVolume* mv : (*m_objects)[obj_idx]->volumes)
-            mv->supported_facets.clear();
+            mv->supported_facets.reset();
         break;
 
     case InfoItemType::CustomSeam:
         cnv->get_gizmos_manager().reset_all_states();
         Plater::TakeSnapshot(plater, _L("Remove paint-on seam"));
         for (ModelVolume* mv : (*m_objects)[obj_idx]->volumes)
-            mv->seam_facets.clear();
+            mv->seam_facets.reset();
         break;
 
     case InfoItemType::MmuSegmentation:
         cnv->get_gizmos_manager().reset_all_states();
         Plater::TakeSnapshot(plater, _L("Remove Multi Material painting"));
         for (ModelVolume* mv : (*m_objects)[obj_idx]->volumes)
-            mv->mmu_segmentation_facets.clear();
+            mv->mmu_segmentation_facets.reset();
         break;
 
     case InfoItemType::Sinking:
@@ -1856,7 +1851,7 @@ void ObjectList::del_settings_from_config(const wxDataViewItem& parent_item)
     if (is_layer_settings)
         layer_height = m_config->opt_float("layer_height");
 
-    m_config->clear();
+    m_config->reset();
 
     if (extruder >= 0)
         m_config->set_key_value("extruder", new ConfigOptionInt(extruder));
@@ -1920,20 +1915,19 @@ bool ObjectList::del_subobject_from_object(const int obj_idx, const int idx, con
             if (vol->is_model_part())
                 ++solid_cnt;
         if (volume->is_model_part() && solid_cnt == 1) {
-            Slic3r::GUI::show_error(nullptr, _(L("From Object List You can't delete the last solid part from object.")));
+            Slic3r::GUI::show_error(nullptr, _L("From Object List You can't delete the last solid part from object."));
             return false;
         }
 
-        take_snapshot(_(L("Delete Subobject")));
+        take_snapshot(_L("Delete Subobject"));
 
         object->delete_volume(idx);
 
-        if (object->volumes.size() == 1)
-        {
+        if (object->volumes.size() == 1) {
             const auto last_volume = object->volumes[0];
             if (!last_volume->config.empty()) {
                 object->config.apply(last_volume->config);
-                last_volume->config.clear();
+                last_volume->config.reset();
 
                 // update extruder color in ObjectList
                 wxDataViewItem obj_item = m_objects_model->GetItemById(obj_idx);
@@ -1948,11 +1942,11 @@ bool ObjectList::del_subobject_from_object(const int obj_idx, const int idx, con
     }
     else if (type == itInstance) {
         if (object->instances.size() == 1) {
-            Slic3r::GUI::show_error(nullptr, _(L("Last instance of an object cannot be deleted.")));
+            Slic3r::GUI::show_error(nullptr, _L("Last instance of an object cannot be deleted."));
             return false;
         }
 
-        take_snapshot(_(L("Delete Instance")));
+        take_snapshot(_L("Delete Instance"));
         object->delete_instance(idx);
     }
     else
@@ -2563,6 +2557,9 @@ wxDataViewItem ObjectList::add_settings_item(wxDataViewItem parent_item, const D
 
 void ObjectList::update_info_items(size_t obj_idx, wxDataViewItemArray* selections/* = nullptr*/, bool added_object/* = false*/)
 {
+    if (obj_idx >= m_objects->size())
+        return;
+
     const ModelObject* model_object = (*m_objects)[obj_idx];
     wxDataViewItem item_obj = m_objects_model->GetItemById(obj_idx);
     assert(item_obj.IsOk());
@@ -2638,7 +2635,7 @@ void ObjectList::add_object_to_list(size_t obj_idx, bool call_selection_changed)
                       model_object->config.has("extruder") ? model_object->config.extruder() : 0,
                       get_mesh_errors_count(obj_idx) > 0);
 
-    update_info_items(obj_idx, nullptr, true);
+    update_info_items(obj_idx, nullptr, call_selection_changed);
 
     // add volumes to the object
     if (model_object->volumes.size() > 1) {
@@ -2731,8 +2728,9 @@ void ObjectList::delete_from_model_and_list(const std::vector<ItemForDelete>& it
         return;
 
     m_prevent_list_events = true;
-    for (std::vector<ItemForDelete>::const_reverse_iterator item = items_for_delete.rbegin(); item != items_for_delete.rend(); ++item)
-    {
+
+    std::set<size_t> modified_objects_ids;
+    for (std::vector<ItemForDelete>::const_reverse_iterator item = items_for_delete.rbegin(); item != items_for_delete.rend(); ++item) {
         if (!(item->type&(itObject | itVolume | itInstance)))
             continue;
         if (item->type&itObject) {
@@ -2742,8 +2740,7 @@ void ObjectList::delete_from_model_and_list(const std::vector<ItemForDelete>& it
         else {
             if (!del_subobject_from_object(item->obj_idx, item->sub_obj_idx, item->type))
                 continue;
-            if (item->type&itVolume)
-            {
+            if (item->type&itVolume) {
                 m_objects_model->Delete(m_objects_model->GetItemByVolumeId(item->obj_idx, item->sub_obj_idx));
                 ModelObject* obj = object(item->obj_idx);
                 if (obj->volumes.size() == 1) {
@@ -2761,7 +2758,14 @@ void ObjectList::delete_from_model_and_list(const std::vector<ItemForDelete>& it
             else
                 m_objects_model->Delete(m_objects_model->GetItemByInstanceId(item->obj_idx, item->sub_obj_idx));
         }
+
+        modified_objects_ids.insert(static_cast<size_t>(item->obj_idx));
     }
+
+    for (size_t id : modified_objects_ids) {
+        update_info_items(id);
+    }
+
     m_prevent_list_events = true;
     part_selection_changed();
 }
@@ -3462,7 +3466,11 @@ void ObjectList::update_selections_on_canvas()
     else
     {
         // add
-        volume_idxs = selection.get_unselected_volume_idxs_from(volume_idxs);
+        // to avoid lost of some volumes in selection
+        // check non-selected volumes only if selection mode wasn't changed
+        // OR there is no single selection
+        if (selection.get_mode() == mode || !single_selection) 
+            volume_idxs = selection.get_unselected_volume_idxs_from(volume_idxs);
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), _(L("Selection-Add from list")));
         selection.add_volumes(mode, volume_idxs, single_selection);
     }
@@ -3763,7 +3771,7 @@ void ObjectList::last_volume_is_deleted(const int obj_idx)
     auto volume = (*m_objects)[obj_idx]->volumes.front();
 
     // clear volume's config values
-    volume->config.clear();
+    volume->config.reset();
 
     // set a default extruder value, since user can't add it manually
     volume->config.set_key_value("extruder", new ConfigOptionInt(0));
@@ -4006,18 +4014,140 @@ void ObjectList::rename_item()
 
 void ObjectList::fix_through_netfabb() 
 {
-    int obj_idx, vol_idx;
-    get_selected_item_indexes(obj_idx, vol_idx);
+    // Do not fix anything when a gizmo is open. There might be issues with updates
+    // and what is worse, the snapshot time would refer to the internal stack.
+    if (!wxGetApp().plater()->canvas3D()->get_gizmos_manager().check_gizmos_closed_except(GLGizmosManager::Undefined))
+        return;
 
-    wxGetApp().plater()->fix_through_netfabb(obj_idx, vol_idx);
-    
-    update_item_error_icon(obj_idx, vol_idx);
-    update_info_items(obj_idx);
+    //          model_name
+    std::vector<std::string>                           succes_models;
+    //                   model_name     failing reason
+    std::vector<std::pair<std::string, std::string>>   failed_models;
+
+    std::vector<int> obj_idxs, vol_idxs;
+    get_selection_indexes(obj_idxs, vol_idxs);
+
+    std::vector<std::string> model_names;
+
+    // clear selections from the non-broken models if any exists
+    // and than fill names of models to repairing 
+    if (vol_idxs.empty()) {
+        for (int i = int(obj_idxs.size())-1; i >= 0; --i)
+                if (object(obj_idxs[i])->get_mesh_errors_count() == 0)
+                    obj_idxs.erase(obj_idxs.begin()+i);
+        for (int obj_idx : obj_idxs)
+            model_names.push_back(object(obj_idx)->name);
+    }
+    else {
+        ModelObject* obj = object(obj_idxs.front());
+        for (int i = int(vol_idxs.size()) - 1; i >= 0; --i)
+            if (obj->get_mesh_errors_count(vol_idxs[i]) == 0)
+                vol_idxs.erase(vol_idxs.begin() + i);
+        for (int vol_idx : vol_idxs)
+            model_names.push_back(obj->volumes[vol_idx]->name);
+    }
+
+    auto plater = wxGetApp().plater();
+
+    auto fix_and_update_progress = [this, plater, model_names](const int obj_idx, const int vol_idx,
+                                          int model_idx,
+                                          wxProgressDialog& progress_dlg,
+                                          std::vector<std::string>& succes_models,
+                                          std::vector<std::pair<std::string, std::string>>& failed_models)
+    {
+        const std::string& model_name = model_names[model_idx];
+        wxString msg = _L("Repairing model");
+        if (model_names.size() == 1)
+            msg += ": " + from_u8(model_name) + "\n";
+        else {
+            msg += ":\n";
+            for (size_t i = 0; i < model_names.size(); ++i)
+                msg += (i == model_idx ? " > " : "   ") + from_u8(model_names[i]) + "\n";
+            msg += "\n";
+        }
+
+        plater->clear_before_change_mesh(obj_idx);
+        std::string res;
+        if (!fix_model_by_win10_sdk_gui(*(object(obj_idx)), vol_idx, progress_dlg, msg, res))
+            return false;
+        wxGetApp().plater()->changed_mesh(obj_idx);
+
+        plater->changed_mesh(obj_idx);
+
+        if (res.empty())
+            succes_models.push_back(model_name);
+        else
+            failed_models.push_back({ model_name, res });
+
+        update_item_error_icon(obj_idx, vol_idx);
+        update_info_items(obj_idx);
+
+        return true;
+    };
+
+    Plater::TakeSnapshot snapshot(plater, _L("Fix through NetFabb"));
+
+    // Open a progress dialog.
+    wxProgressDialog progress_dlg(_L("Fixing through NetFabb"), "", 100,
+                                    nullptr, // ! parent of the wxProgressDialog should be nullptr to avoid flickering during the model fixing
+                                    wxPD_AUTO_HIDE | wxPD_APP_MODAL | wxPD_CAN_ABORT);
+    int model_idx{ 0 };
+    if (vol_idxs.empty()) {
+        int vol_idx{ -1 };
+        for (int obj_idx : obj_idxs) {
+            if (object(obj_idx)->get_mesh_errors_count(vol_idx) == 0)
+                continue;
+            if (!fix_and_update_progress(obj_idx, vol_idx, model_idx, progress_dlg, succes_models, failed_models))
+                break;
+            model_idx++;
+        }
+    }
+    else {
+        int obj_idx{ obj_idxs.front() };
+        for (int vol_idx : vol_idxs) {
+            if (!fix_and_update_progress(obj_idx, vol_idx, model_idx, progress_dlg, succes_models, failed_models))
+                break;
+            model_idx++;
+        }
+    }
+    // Close the progress dialog
+    progress_dlg.Update(100, "");
+
+    // Show info message
+    wxString msg;
+    wxString bullet_suf = "\n   - ";
+    if (!succes_models.empty()) {
+        msg = _L_PLURAL("Folowing model is repaired successfully", "Folowing models are repaired successfully", succes_models.size()) + ":";
+        for (auto& model : succes_models)
+            msg += bullet_suf + from_u8(model);
+        msg += "\n\n";
+    }
+    if (!failed_models.empty()) {
+        msg += _L_PLURAL("Folowing model repair failed", "Folowing models repair failed", failed_models.size()) + ":\n";
+        for (auto& model : failed_models)
+            msg += bullet_suf + from_u8(model.first) + ": " + _(model.second);
+    }
+    if (msg.IsEmpty())
+        msg = _L("Repairing was canceled");
+    // !!! Use wxMessageDialog instead of MessageDialog here
+    // It will not be "dark moded" but the Application will not lose a focus after model repairing
+    wxMessageDialog(nullptr, msg, _L("Model Repair by the Netfabb service"), wxICON_INFORMATION | wxOK).ShowModal();
 }
 
 void ObjectList::simplify()
 {
-    GLGizmosManager& gizmos_mgr = wxGetApp().plater()->canvas3D()->get_gizmos_manager();
+    auto plater = wxGetApp().plater();
+    GLGizmosManager& gizmos_mgr = plater->canvas3D()->get_gizmos_manager();
+
+    // Do not simplify when a gizmo is open. There might be issues with updates
+    // and what is worse, the snapshot time would refer to the internal stack.
+    if (! gizmos_mgr.check_gizmos_closed_except(GLGizmosManager::EType::Simplify))
+        return;
+
+    if (gizmos_mgr.get_current_type() == GLGizmosManager::Simplify) {
+        // close first
+        gizmos_mgr.open_gizmo(GLGizmosManager::EType::Simplify);
+    }
     gizmos_mgr.open_gizmo(GLGizmosManager::EType::Simplify);
 }
 
