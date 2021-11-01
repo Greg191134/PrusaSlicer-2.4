@@ -13,6 +13,7 @@
 #include "DoubleSlider.hpp"
 #include "Plater.hpp"
 #include "MainFrame.hpp"
+#include "format.hpp"
 
 #include <wx/listbook.h>
 #include <wx/notebook.h>
@@ -496,13 +497,22 @@ void Preview::on_combochecklist_features(wxCommandEvent& evt)
 
 void Preview::on_combochecklist_options(wxCommandEvent& evt)
 {
-    unsigned int curr_flags = m_canvas->get_gcode_options_visibility_flags();
-    unsigned int new_flags = Slic3r::GUI::combochecklist_get_flags(m_combochecklist_options);
+    const unsigned int curr_flags = m_canvas->get_gcode_options_visibility_flags();
+    const unsigned int new_flags = Slic3r::GUI::combochecklist_get_flags(m_combochecklist_options);
     if (curr_flags == new_flags)
         return;
 
     m_canvas->set_gcode_options_visibility_from_flags(new_flags);
-    m_canvas->refresh_gcode_preview_render_paths();
+    if (m_canvas->get_gcode_view_type() == GCodeViewer::EViewType::Feedrate) {
+        const unsigned int diff_flags = curr_flags ^ new_flags;
+        if ((diff_flags & (1 << static_cast<unsigned int>(Preview::OptionType::Travel))) != 0)
+            refresh_print();
+        else
+            m_canvas->refresh_gcode_preview_render_paths();
+    }
+    else
+        m_canvas->refresh_gcode_preview_render_paths();
+
     update_moves_slider();
 }
 
@@ -678,7 +688,6 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool kee
     if (m_layers_slider->IsNewPrint())
     {
         const Print& print = wxGetApp().plater()->fff_print();
-        double delta_area = scale_(scale_(25)); // equal to 25 mm2
 
         //bool is_possible_auto_color_change = false;
         for (auto object : print.objects()) {
@@ -699,7 +708,7 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool kee
             int  i, min_solid_height = int(0.25 * num_layers);
             for (i = 1; i <= min_solid_height; ++ i) {
                 double cur_area = area(object->get_layer(i)->lslices);
-                if (cur_area != bottom_area && fabs(cur_area - bottom_area) > scale_(scale_(1))) {
+                if (!DoubleSlider::equivalent_areas(bottom_area, cur_area)) {
                     // but due to the elephant foot compensation, the first layer may be slightly smaller than the others
                     if (i == 1 && fabs(cur_area - bottom_area) / bottom_area < 0.1) {
                         // So, let process this case and use second layer as a bottom 
@@ -712,33 +721,23 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool kee
             if (i < min_solid_height)
                 continue;
 
-            // bottom layer have to be a biggest, so control relation between bottom layer and object size
-            double prev_area = area(object->get_layer(i)->lslices);
-            for ( i++; i < num_layers; i++) {
-                double cur_area = area(object->get_layer(i)->lslices);
-                if (cur_area > prev_area && prev_area - cur_area > scale_(scale_(1)))
-                    break;
-                prev_area = cur_area;
-            }
-            if (i < num_layers)
-                continue;
-
-            double top_area = area(object->get_layer(int(object->layers().size()) - 1)->lslices);
-            if( bottom_area - top_area > delta_area) {
-                NotificationManager *notif_mngr = wxGetApp().plater()->get_notification_manager();
+            if (DoubleSlider::check_color_change(object, i, num_layers, true, [this, object](Layer*) {
+                NotificationManager* notif_mngr = wxGetApp().plater()->get_notification_manager();
                 notif_mngr->push_notification(
                     NotificationType::SignDetected, NotificationManager::NotificationLevel::PrintInfoNotificationLevel,
-                    _u8L("NOTE:") + "\n" + _u8L("Sliced object looks like the sign") + "\n",
-                    _u8L("Apply auto color change to print"),
+                    _u8L("NOTE:") + "\n" +
+                    format(_u8L("Sliced object \"%1%\" looks like a logo or a sign"), object->model_object()->name) + "\n",
+                    _u8L("Apply automatic color change"),
                     [this](wxEvtHandler*) {
                         m_layers_slider->auto_color_change();
                         return true;
                     });
 
                 notif_mngr->apply_in_preview();
-
+                return true;
+            }) )
+                // first object with color chnages is found
                 break;
-            }
         }
     }
 
@@ -962,10 +961,9 @@ void Preview::load_print_as_fff(bool keep_z_range)
                 if (0 <= type && type < static_cast<int>(GCodeViewer::EViewType::Count)) {
                     m_choice_view_type->SetSelection(type);
                     m_canvas->set_gcode_view_preview_type(static_cast<GCodeViewer::EViewType>(type));
-                    if (wxGetApp().is_gcode_viewer()) {
+                    if (wxGetApp().is_gcode_viewer())
                         m_keep_current_preview_type = true;
-                        refresh_print();
-                    }
+                    refresh_print();
                 }
             }
         }

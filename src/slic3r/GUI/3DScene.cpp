@@ -10,6 +10,10 @@
 #include "GLShader.hpp"
 #include "GUI_App.hpp"
 #include "Plater.hpp"
+#include "BitmapCache.hpp"
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+#include "3DBed.hpp"
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
 
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
@@ -17,7 +21,6 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Slicing.hpp"
-#include "slic3r/GUI/BitmapCache.hpp"
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/AppConfig.hpp"
@@ -261,6 +264,12 @@ void GLIndexedVertexArray::render(
     const std::pair<size_t, size_t>& tverts_range,
     const std::pair<size_t, size_t>& qverts_range) const
 {
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+    // this method has been called before calling finalize() ?
+    if (this->vertices_and_normals_interleaved_VBO_id == 0 && !this->vertices_and_normals_interleaved.empty())
+        return;
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+
     assert(this->vertices_and_normals_interleaved_VBO_id != 0);
     assert(this->triangle_indices_VBO_id != 0 || this->quad_indices_VBO_id != 0);
 
@@ -319,19 +328,7 @@ void GLVolume::SinkingContours::update()
             MeshSlicingParams slicing_params;
             slicing_params.trafo = m_parent.world_matrix();
             Polygons polygons = union_(slice_mesh(mesh.its, 0.0f, slicing_params));
-            for (Polygon& polygon : polygons) {
-                if (polygon.is_clockwise())
-                    polygon.reverse();
-                Polygons outer_polys = offset(polygon, float(scale_(HalfWidth)));
-                assert(outer_polys.size() == 1);
-                if (outer_polys.empty())
-                    // no outer contour, skip
-                    continue;
-
-                ExPolygon expoly(std::move(outer_polys.front()));
-                expoly.holes = offset(polygon, -float(scale_(HalfWidth)));
-                polygons_reverse(expoly.holes);
-
+            for (ExPolygon &expoly : diff_ex(expand(polygons, float(scale_(HalfWidth))), shrink(polygons, float(scale_(HalfWidth))))) {
                 GUI::GLModel::InitializationData::Entity entity;
                 entity.type = GUI::GLModel::PrimitiveType::Triangles;
                 const std::vector<Vec3d> triangulation = triangulate_expolygon_3d(expoly);
@@ -464,9 +461,15 @@ std::array<float, 4> color_from_model_volume(const ModelVolume& model_volume)
         color[2] = 0.2f;
     }
     else if (model_volume.is_modifier()) {
+#if ENABLE_MODIFIERS_ALWAYS_TRANSPARENT
+        color[0] = 1.0f;
+        color[1] = 1.0f;
+        color[2] = 0.2f;
+#else
         color[0] = 0.2f;
         color[1] = 1.0f;
         color[2] = 0.2f;
+#endif // ENABLE_MODIFIERS_ALWAYS_TRANSPARENT
     }
     else if (model_volume.is_support_blocker()) {
         color[0] = 1.0f;
@@ -522,6 +525,23 @@ BoundingBoxf3 GLVolume::transformed_convex_hull_bounding_box(const Transform3d &
 		m_convex_hull->transformed_bounding_box(trafo) :
         bounding_box().transformed(trafo);
 }
+
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+BoundingBoxf3 GLVolume::transformed_non_sinking_bounding_box(const Transform3d& trafo) const
+{
+    return GUI::wxGetApp().plater()->model().objects[object_idx()]->volumes[volume_idx()]->mesh().transformed_bounding_box(trafo, 0.0);
+}
+
+const BoundingBoxf3& GLVolume::transformed_non_sinking_bounding_box() const
+{
+    if (!m_transformed_non_sinking_bounding_box.has_value()) {
+        std::optional<BoundingBoxf3>* trans_box = const_cast<std::optional<BoundingBoxf3>*>(&m_transformed_non_sinking_bounding_box);
+        const Transform3d& trafo = world_matrix();
+        *trans_box = transformed_non_sinking_bounding_box(trafo);
+    }
+    return *m_transformed_non_sinking_bounding_box;
+}
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
 
 void GLVolume::set_range(double min_z, double max_z)
 {
@@ -596,6 +616,22 @@ void GLVolume::render_sinking_contours()
 {
     m_sinking_contours.render();
 }
+
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+void GLVolume::calc_convex_hull_3d()
+{
+    const std::vector<float> &src = this->indexed_vertex_array.vertices_and_normals_interleaved;
+    std::vector<Vec3f>        pts;
+    assert(src.size() % 6 == 0);
+    pts.reserve(src.size() / 6);
+    for (auto it = src.begin(); it != src.end(); ) {
+        it += 3;
+        pts.push_back({ *it, *(it + 1), *(it + 2) });
+        it += 3;
+    }
+    this->set_convex_hull(TriangleMesh(its_convex_hull(pts)));
+}
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
 
 std::vector<int> GLVolumeCollection::load_object(
     const ModelObject       *model_object,
@@ -754,7 +790,10 @@ int GLVolumeCollection::load_wipe_tower_preview(
 
     volumes.emplace_back(new GLVolume(color));
     GLVolume& v = *volumes.back();
-    v.indexed_vertex_array.load_mesh(mesh);    
+    v.indexed_vertex_array.load_mesh(mesh);
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+    v.set_convex_hull(mesh.convex_hull_3d());
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
     v.indexed_vertex_array.finalize_geometry(opengl_initialized);
     v.set_volume_offset(Vec3d(pos_x, pos_y, 0.0));
     v.set_volume_rotation(Vec3d(0., 0., (M_PI / 180.) * rotation_angle));
@@ -836,7 +875,15 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType type, bool disab
         glsafe(::glDisable(GL_CULL_FACE));
 
     for (GLVolumeWithIdAndZ& volume : to_render) {
+#if ENABLE_MODIFIERS_ALWAYS_TRANSPARENT
+        if (type == ERenderType::Transparent)
+            volume.first->force_transparent = true;
+#endif // ENABLE_MODIFIERS_ALWAYS_TRANSPARENT
         volume.first->set_render_color();
+#if ENABLE_MODIFIERS_ALWAYS_TRANSPARENT
+        if (type == ERenderType::Transparent)
+            volume.first->force_transparent = false;
+#endif // ENABLE_MODIFIERS_ALWAYS_TRANSPARENT
 
         // render sinking contours of non-hovered volumes
         if (m_show_sinking_contours)
@@ -853,10 +900,17 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType type, bool disab
         shader->set_uniform("uniform_color", volume.first->render_color);
         shader->set_uniform("z_range", m_z_range, 2);
         shader->set_uniform("clipping_plane", m_clipping_plane, 4);
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+        shader->set_uniform("print_volume.type", static_cast<int>(m_print_volume.type));
+        shader->set_uniform("print_volume.xy_data", m_print_volume.data);
+        shader->set_uniform("print_volume.z_data", m_print_volume.zs);
+        shader->set_uniform("volume_world_matrix", volume.first->world_matrix());
+#else
         shader->set_uniform("print_box.min", m_print_box_min, 3);
         shader->set_uniform("print_box.max", m_print_box_max, 3);
         shader->set_uniform("print_box.actived", volume.first->shader_outside_printer_detection_enabled);
         shader->set_uniform("print_box.volume_world_matrix", volume.first->world_matrix());
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
         shader->set_uniform("slope.actived", m_slope.active && !volume.first->is_modifier && !volume.first->is_wipe_tower);
         shader->set_uniform("slope.volume_world_normal_matrix", static_cast<Matrix3f>(volume.first->world_matrix().matrix().block(0, 0, 3, 3).inverse().transpose().cast<float>()));
         shader->set_uniform("slope.normal_z", m_slope.normal_z);
@@ -905,7 +959,11 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType type, bool disab
         glsafe(::glDisable(GL_BLEND));
 }
 
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+bool GLVolumeCollection::check_outside_state(const DynamicPrintConfig* config, ModelInstanceEPrintVolumeState* out_state, bool as_toolpaths) const
+#else
 bool GLVolumeCollection::check_outside_state(const DynamicPrintConfig* config, ModelInstanceEPrintVolumeState* out_state) const
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
 {
     if (config == nullptr)
         return false;
@@ -914,22 +972,103 @@ bool GLVolumeCollection::check_outside_state(const DynamicPrintConfig* config, M
     if (opt == nullptr)
         return false;
 
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+    const Polygon bed_poly = offset(Polygon::new_scale(opt->values), static_cast<float>(scale_(BedEpsilon))).front();
+    const float bed_height = config->opt_float("max_print_height");
+    const BoundingBox bed_box_2D = get_extents(bed_poly);
+    BoundingBoxf3 print_volume({ unscale<double>(bed_box_2D.min.x()), unscale<double>(bed_box_2D.min.y()), -1e10 },
+                               { unscale<double>(bed_box_2D.max.x()), unscale<double>(bed_box_2D.max.y()), bed_height });
+
+    auto check_against_rectangular_bed = [&print_volume](GLVolume& volume, ModelInstanceEPrintVolumeState& state) {
+        const BoundingBoxf3* const bb = (volume.is_sinking() && volume.object_idx() != -1 && volume.volume_idx() != -1) ? &volume.transformed_non_sinking_bounding_box() : &volume.transformed_convex_hull_bounding_box();
+        volume.is_outside = !print_volume.contains(*bb);
+        if (volume.printable) {
+            if (state == ModelInstancePVS_Inside && volume.is_outside)
+                state = ModelInstancePVS_Fully_Outside;
+            if (state == ModelInstancePVS_Fully_Outside && volume.is_outside && print_volume.intersects(*bb))
+                state = ModelInstancePVS_Partly_Outside;
+        }
+    };
+
+    auto check_against_circular_bed = [bed_height](GLVolume& volume, ModelInstanceEPrintVolumeState& state, const Vec2d& center, double radius) {
+        const TriangleMesh* mesh = (volume.is_sinking() && volume.object_idx() != -1 && volume.volume_idx() != -1) ? &GUI::wxGetApp().plater()->model().objects[volume.object_idx()]->volumes[volume.volume_idx()]->mesh() : volume.convex_hull();
+        const double sq_radius = sqr(radius);
+        size_t outside_count = 0;
+        size_t valid_count = 0;
+        for (const Vec3f& v : mesh->its.vertices) {
+            const Vec3f world_v = volume.world_matrix().cast<float>() * v;
+            if (0.0f <= world_v.z()) {
+                ++valid_count;
+                if (sq_radius < sqr(world_v.x() - center.x()) + sqr(world_v.y() - center.y()) || bed_height < world_v.z())
+                    ++outside_count;
+            }
+        }
+        volume.is_outside = outside_count > 0;
+        if (volume.printable) {
+            if (state == ModelInstancePVS_Inside && volume.is_outside)
+                state = ModelInstancePVS_Fully_Outside;
+            if (state == ModelInstancePVS_Fully_Outside && volume.is_outside && outside_count < valid_count)
+                state = ModelInstancePVS_Partly_Outside;
+        }
+    };
+
+    auto check_against_convex_bed = [&bed_poly, bed_height](GLVolume& volume, ModelInstanceEPrintVolumeState& state) {
+        const TriangleMesh* mesh = (volume.is_sinking() && volume.object_idx() != -1 && volume.volume_idx() != -1) ? &GUI::wxGetApp().plater()->model().objects[volume.object_idx()]->volumes[volume.volume_idx()]->mesh() : volume.convex_hull();
+        const Polygon volume_hull_2d = its_convex_hull_2d_above(mesh->its, volume.world_matrix().cast<float>(), 0.0f);
+        const BoundingBoxf3* const bb = (volume.is_sinking() && volume.object_idx() != -1 && volume.volume_idx() != -1) ? &volume.transformed_non_sinking_bounding_box() : &volume.transformed_convex_hull_bounding_box();
+        // Using rotating callipers to check for collision of two convex polygons.
+        ModelInstanceEPrintVolumeState volume_state = printbed_collision_state(bed_poly, bed_height, volume_hull_2d, bb->min.z(), bb->max.z());
+        bool contained = (volume_state == ModelInstancePVS_Inside);
+        bool intersects = (volume_state == ModelInstancePVS_Partly_Outside);
+
+        volume.is_outside = !contained;
+        if (volume.printable) {
+            if (state == ModelInstancePVS_Inside && volume.is_outside)
+                state = ModelInstancePVS_Fully_Outside;
+
+            if (state == ModelInstancePVS_Fully_Outside && volume.is_outside && intersects)
+                state = ModelInstancePVS_Partly_Outside;
+        }
+    };
+#else
     const BoundingBox bed_box_2D = get_extents(Polygon::new_scale(opt->values));
-    BoundingBoxf3 print_volume({ unscale<double>(bed_box_2D.min.x()), unscale<double>(bed_box_2D.min.y()), 0.0 }, 
-                               { unscale<double>(bed_box_2D.max.x()), unscale<double>(bed_box_2D.max.y()),
-                               config->opt_float("max_print_height") });
+    BoundingBoxf3 print_volume({ unscale<double>(bed_box_2D.min.x()), unscale<double>(bed_box_2D.min.y()), 0.0 },
+        { unscale<double>(bed_box_2D.max.x()), unscale<double>(bed_box_2D.max.y()), config->opt_float("max_print_height") });
     // Allow the objects to protrude below the print bed
-    print_volume.min(2) = -1e10;
-    print_volume.min(0) -= BedEpsilon;
-    print_volume.min(1) -= BedEpsilon;
-    print_volume.max(0) += BedEpsilon;
-    print_volume.max(1) += BedEpsilon;
+    print_volume.min.z() = -1e10;
+    print_volume.min.x() -= BedEpsilon;
+    print_volume.min.y() -= BedEpsilon;
+    print_volume.max.x() += BedEpsilon;
+    print_volume.max.y() += BedEpsilon;
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
 
-    ModelInstanceEPrintVolumeState state = ModelInstancePVS_Inside;
-
+    ModelInstanceEPrintVolumeState overall_state = ModelInstancePVS_Inside;
     bool contained_min_one = false;
 
+    enum class BedShape { Rectangle, Circle, Convex, NonConvex };
+    Vec2d  center;
+    double radius;
+    BedShape bed_shape = 
+        GUI::Bed3D::is_rectangle(opt->values) ? BedShape::Rectangle :
+        GUI::Bed3D::is_circle(opt->values, &center, &radius) ? BedShape::Circle :
+        GUI::Bed3D::is_convex(opt->values) ? BedShape::Convex : BedShape::NonConvex;
+
     for (GLVolume* volume : this->volumes) {
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+        if (as_toolpaths && !volume->is_extrusion_path)
+            continue;
+        else if (!as_toolpaths && (volume->is_modifier || (!volume->shader_outside_printer_detection_enabled && (volume->is_wipe_tower || volume->composite_id.volume_id < 0))))
+            continue;
+
+        switch (bed_shape) {
+        case BedShape::Rectangle:   check_against_rectangular_bed(*volume, overall_state);              break;
+        case BedShape::Circle:      check_against_circular_bed(*volume, overall_state, center, radius); break;
+        case BedShape::Convex:      check_against_convex_bed(*volume, overall_state);                   break;
+        default: break;
+        }
+
+        contained_min_one |= !volume->is_outside;
+#else
         if (volume->is_modifier || (!volume->shader_outside_printer_detection_enabled && (volume->is_wipe_tower || volume->composite_id.volume_id < 0)))
             continue;
 
@@ -942,15 +1081,16 @@ bool GLVolumeCollection::check_outside_state(const DynamicPrintConfig* config, M
 
         contained_min_one |= contained;
 
-        if (state == ModelInstancePVS_Inside && volume->is_outside)
-            state = ModelInstancePVS_Fully_Outside;
+        if (overall_state == ModelInstancePVS_Inside && volume->is_outside)
+            overall_state = ModelInstancePVS_Fully_Outside;
 
-        if (state == ModelInstancePVS_Fully_Outside && volume->is_outside && print_volume.intersects(bb))
-            state = ModelInstancePVS_Partly_Outside;
+        if (overall_state == ModelInstancePVS_Fully_Outside && volume->is_outside && print_volume.intersects(bb))
+            overall_state = ModelInstancePVS_Partly_Outside;
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
     }
 
     if (out_state != nullptr)
-        *out_state = state;
+        *out_state = overall_state;
 
     return contained_min_one;
 }
@@ -1006,35 +1146,28 @@ void GLVolumeCollection::update_colors_by_extruder(const DynamicPrintConfig* con
     std::vector<Color> colors(colors_count);
 
     unsigned char rgb[3];
-    for (unsigned int i = 0; i < colors_count; ++i)
-    {
+    for (unsigned int i = 0; i < colors_count; ++i) {
         const std::string& txt_color = config->opt_string("extruder_colour", i);
         if (Slic3r::GUI::BitmapCache::parse_color(txt_color, rgb))
-        {
             colors[i].set(txt_color, rgb);
-        }
-        else
-        {
+        else {
             const std::string& txt_color = config->opt_string("filament_colour", i);
             if (Slic3r::GUI::BitmapCache::parse_color(txt_color, rgb))
                 colors[i].set(txt_color, rgb);
         }
     }
 
-    for (GLVolume* volume : volumes)
-    {
-        if ((volume == nullptr) || volume->is_modifier || volume->is_wipe_tower || (volume->volume_idx() < 0))
+    for (GLVolume* volume : volumes) {
+        if (volume == nullptr || volume->is_modifier || volume->is_wipe_tower || (volume->volume_idx() < 0))
             continue;
 
         int extruder_id = volume->extruder_id - 1;
-        if ((extruder_id < 0) || ((int)colors.size() <= extruder_id))
+        if (extruder_id < 0 || (int)colors.size() <= extruder_id)
             extruder_id = 0;
 
         const Color& color = colors[extruder_id];
-        if (!color.text.empty())
-        {
-            for (int i = 0; i < 3; ++i)
-            {
+        if (!color.text.empty()) {
+            for (int i = 0; i < 3; ++i) {
                 volume->color[i] = (float)color.rgb[i] * inv_255;
             }
         }

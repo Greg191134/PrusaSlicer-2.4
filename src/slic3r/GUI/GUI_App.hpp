@@ -166,12 +166,15 @@ public:
     bool is_editor() const { return m_app_mode == EAppMode::Editor; }
     bool is_gcode_viewer() const { return m_app_mode == EAppMode::GCodeViewer; }
     bool is_recreating_gui() const { return m_is_recreating_gui; }
+    std::string logo_name() const { return is_editor() ? "PrusaSlicer" : "PrusaSlicer-gcodeviewer"; }
 
     // To be called after the GUI is fully built up.
     // Process command line parameters cached in this->init_params,
     // load configs, STLs etc.
     void            post_init();
-    static std::string get_gl_info(bool format_as_html, bool extensions);
+    // If formatted for github, plaintext with OpenGL extensions enclosed into <details>.
+    // Otherwise HTML formatted for the system info dialog.
+    static std::string get_gl_info(bool for_github);
     wxGLContext*    init_glcontext(wxGLCanvas& canvas);
     bool            init_opengl();
 
@@ -258,7 +261,7 @@ public:
     wxString 		current_language_code_safe() const;
     bool            is_localized() const { return m_wxLocale->GetLocale() != "English"; }
 
-    void            open_preferences(size_t open_on_tab = 0);
+    void            open_preferences(size_t open_on_tab = 0, const std::string& highlight_option = std::string());
 
     virtual bool OnExceptionInMainLoop() override;
     // Calls wxLaunchDefaultBrowser if user confirms in dialog.
@@ -309,6 +312,7 @@ public:
     PrintHostJobQueue& printhost_job_queue() { return *m_printhost_job_queue.get(); }
 
     void            open_web_page_localized(const std::string &http_address);
+    bool            may_switch_to_SLA_preset(const wxString& caption);
     bool            run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage start_page = ConfigWizard::SP_WELCOME);
     void            show_desktop_integration_dialog();
 
@@ -322,6 +326,7 @@ public:
 
     bool is_gl_version_greater_or_equal_to(unsigned int major, unsigned int minor) const { return m_opengl_mgr.get_gl_info().is_version_greater_or_equal_to(major, minor); }
     bool is_glsl_version_greater_or_equal_to(unsigned int major, unsigned int minor) const { return m_opengl_mgr.get_gl_info().is_glsl_version_greater_or_equal_to(major, minor); }
+    int  GetSingleChoiceIndex(const wxString& message, const wxString& caption, const wxArrayString& choices, int initialSelection);
 
 #ifdef __WXMSW__
     void            associate_3mf_files();

@@ -205,9 +205,7 @@ void GCodeProcessor::TimeMachine::simulate_st_synchronize(float additional_time)
     if (!enabled)
         return;
 
-    time += additional_time;
-    gcode_time.cache += additional_time;
-    calculate_time();
+    calculate_time(0, additional_time);
 }
 
 static void planner_forward_pass_kernel(GCodeProcessor::TimeBlock& prev, GCodeProcessor::TimeBlock& curr)
@@ -280,7 +278,7 @@ static void recalculate_trapezoids(std::vector<GCodeProcessor::TimeBlock>& block
     }
 }
 
-void GCodeProcessor::TimeMachine::calculate_time(size_t keep_last_n_blocks)
+void GCodeProcessor::TimeMachine::calculate_time(size_t keep_last_n_blocks, float additional_time)
 {
     if (!enabled || blocks.size() < 2)
         return;
@@ -302,20 +300,21 @@ void GCodeProcessor::TimeMachine::calculate_time(size_t keep_last_n_blocks)
     for (size_t i = 0; i < n_blocks_process; ++i) {
         const TimeBlock& block = blocks[i];
         float block_time = block.time();
+        if (i == 0)
+            block_time += additional_time;
+
         time += block_time;
         gcode_time.cache += block_time;
         moves_time[static_cast<size_t>(block.move_type)] += block_time;
         roles_time[static_cast<size_t>(block.role)] += block_time;
-        if (block.layer_id > 0) {
-            if (block.layer_id >= layers_time.size()) {
-                size_t curr_size = layers_time.size();
-                layers_time.resize(block.layer_id);
-                for (size_t i = curr_size; i < layers_time.size(); ++i) {
-                    layers_time[i] = 0.0f;
-                }
+        if (block.layer_id >= layers_time.size()) {
+            const size_t curr_size = layers_time.size();
+            layers_time.resize(block.layer_id);
+            for (size_t i = curr_size; i < layers_time.size(); ++i) {
+                layers_time[i] = 0.0f;
             }
-            layers_time[block.layer_id - 1] += block_time;
         }
+        layers_time[block.layer_id - 1] += block_time;
         g1_times_cache.push_back({ block.g1_line_id, time });
         // update times for remaining time to printer stop placeholders
         auto it_stop_time = std::lower_bound(stop_times.begin(), stop_times.end(), block.g1_line_id,
@@ -720,6 +719,9 @@ void GCodeProcessor::UsedFilaments::process_caches(GCodeProcessor* processor)
 void GCodeProcessor::Result::reset() {
     moves = std::vector<GCodeProcessor::MoveVertex>();
     bed_shape = Pointfs();
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+    max_print_height = 0.0f;
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
     settings_ids.reset();
     extruders_count = 0;
     extruder_colors = std::vector<std::string>();
@@ -734,6 +736,9 @@ void GCodeProcessor::Result::reset() {
     moves.clear();
     lines_ends.clear();
     bed_shape = Pointfs();
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+    max_print_height = 0.0f;
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
     settings_ids.reset();
     extruders_count = 0;
     extruder_colors = std::vector<std::string>();
@@ -883,6 +888,10 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     const ConfigOptionFloatOrPercent* first_layer_height = config.option<ConfigOptionFloatOrPercent>("first_layer_height");
     if (first_layer_height != nullptr)
         m_first_layer_height = std::abs(first_layer_height->value);
+
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+    m_result.max_print_height = config.max_print_height;
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
 }
 
 void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
@@ -1112,6 +1121,12 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
     const ConfigOptionFloatOrPercent* first_layer_height = config.option<ConfigOptionFloatOrPercent>("first_layer_height");
     if (first_layer_height != nullptr)
         m_first_layer_height = std::abs(first_layer_height->value);
+
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+    const ConfigOptionFloat* max_print_height = config.option<ConfigOptionFloat>("max_print_height");
+    if (max_print_height != nullptr)
+        m_result.max_print_height = max_print_height->value;
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
 }
 
 void GCodeProcessor::enable_stealth_time_estimator(bool enabled)
@@ -1251,7 +1266,7 @@ void GCodeProcessor::process_file(const std::string& filename, std::function<voi
                 cancel_callback();
         }
         this->process_gcode_line(line, true);
-    });
+    }, m_result.lines_ends);
 
     // Don't post-process the G-code to update time stamps.
     this->finalize(false);
@@ -2526,7 +2541,7 @@ void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line)
         block.role = m_extrusion_role;
         block.distance = distance;
         block.g1_line_id = m_g1_line_id;
-        block.layer_id = m_layer_id;
+        block.layer_id = std::max<unsigned int>(1, m_layer_id);
 
         // calculates block cruise feedrate
         float min_feedrate_factor = 1.0f;
@@ -2663,7 +2678,7 @@ void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line)
         if (type == EMoveType::Extrude && m_extrusion_role == erExternalPerimeter && !m_seams_detector.has_first_vertex())
             m_seams_detector.set_first_vertex(m_result.moves.back().position - m_extruder_offsets[m_extruder_id]);
         // check for seam ending vertex and store the resulting move
-        else if ((type != EMoveType::Extrude || m_extrusion_role != erExternalPerimeter) && m_seams_detector.has_first_vertex()) {
+        else if ((type != EMoveType::Extrude || (m_extrusion_role != erExternalPerimeter && m_extrusion_role != erOverhangPerimeter)) && m_seams_detector.has_first_vertex()) {
             auto set_end_position = [this](const Vec3f& pos) {
                 m_end_position[X] = pos.x(); m_end_position[Y] = pos.y(); m_end_position[Z] = pos.z();
             };
@@ -2672,6 +2687,7 @@ void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line)
             const Vec3f new_pos = m_result.moves.back().position - m_extruder_offsets[m_extruder_id];
             const std::optional<Vec3f> first_vertex = m_seams_detector.get_first_vertex();
             // the threshold value = 0.0625f == 0.25 * 0.25 is arbitrary, we may find some smarter condition later
+
             if ((new_pos - *first_vertex).squaredNorm() < 0.0625f) {
                 set_end_position(0.5f * (new_pos + *first_vertex));
                 store_move_vertex(EMoveType::Seam);
@@ -2680,6 +2696,10 @@ void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line)
 
             m_seams_detector.activate(false);
         }
+    }
+    else if (type == EMoveType::Extrude && m_extrusion_role == erExternalPerimeter) {
+        m_seams_detector.activate(true);
+        m_seams_detector.set_first_vertex(m_result.moves.back().position - m_extruder_offsets[m_extruder_id]);
     }
 
     // store move
@@ -2861,6 +2881,8 @@ void GCodeProcessor::process_M109(const GCodeReader::GCodeLine& line)
         else
             m_extruder_temps[m_extruder_id] = new_temp;
     }
+    else if (line.has_value('S', new_temp))
+        m_extruder_temps[m_extruder_id] = new_temp;
 }
 
 void GCodeProcessor::process_M132(const GCodeReader::GCodeLine& line)

@@ -6,10 +6,79 @@
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/Line.hpp"
 #include "libslic3r/Geometry.hpp"
+#include "libslic3r/Geometry/Circle.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ShortestPath.hpp"
 
+//#include <random>
+//#include "libnest2d/tools/benchmark.h"
+#include "libslic3r/SVG.hpp"
+
+#include "../libnest2d/printer_parts.hpp"
+
+#include <unordered_set>
+
 using namespace Slic3r;
+
+TEST_CASE("Line::parallel_to", "[Geometry]"){
+    Line l{ { 100000, 0 }, { 0, 0 } };
+    Line l2{ { 200000, 0 }, { 0, 0 } };
+    REQUIRE(l.parallel_to(l));
+    REQUIRE(l.parallel_to(l2));
+
+    Line l3(l2);
+    l3.rotate(0.9 * EPSILON, { 0, 0 });
+    REQUIRE(l.parallel_to(l3));
+
+    Line l4(l2);
+    l4.rotate(1.1 * EPSILON, { 0, 0 });
+    REQUIRE(! l.parallel_to(l4));
+
+    // The angle epsilon is so low that vectors shorter than 100um rotated by epsilon radians are not rotated at all.
+    Line l5{ { 20000, 0 }, { 0, 0 } };
+    l5.rotate(1.1 * EPSILON, { 0, 0 });
+    REQUIRE(l.parallel_to(l5));
+
+    l.rotate(1., { 0, 0 });
+    Point offset{ 342876, 97636249 };
+    l.translate(offset);
+    l3.rotate(1., { 0, 0 });
+    l3.translate(offset);
+    l4.rotate(1., { 0, 0 });
+    l4.translate(offset);
+    REQUIRE(l.parallel_to(l3));
+    REQUIRE(!l.parallel_to(l4));
+}
+
+TEST_CASE("Line::perpendicular_to", "[Geometry]") {
+    Line l{ { 100000, 0 }, { 0, 0 } };
+    Line l2{ { 0, 200000 }, { 0, 0 } };
+    REQUIRE(! l.perpendicular_to(l));
+    REQUIRE(l.perpendicular_to(l2));
+
+    Line l3(l2);
+    l3.rotate(0.9 * EPSILON, { 0, 0 });
+    REQUIRE(l.perpendicular_to(l3));
+
+    Line l4(l2);
+    l4.rotate(1.1 * EPSILON, { 0, 0 });
+    REQUIRE(! l.perpendicular_to(l4));
+
+    // The angle epsilon is so low that vectors shorter than 100um rotated by epsilon radians are not rotated at all.
+    Line l5{ { 0, 20000 }, { 0, 0 } };
+    l5.rotate(1.1 * EPSILON, { 0, 0 });
+    REQUIRE(l.perpendicular_to(l5));
+
+    l.rotate(1., { 0, 0 });
+    Point offset{ 342876, 97636249 };
+    l.translate(offset);
+    l3.rotate(1., { 0, 0 });
+    l3.translate(offset);
+    l4.rotate(1., { 0, 0 });
+    l4.translate(offset);
+    REQUIRE(l.perpendicular_to(l3));
+    REQUIRE(! l.perpendicular_to(l4));
+}
 
 TEST_CASE("Polygon::contains works properly", "[Geometry]"){
    // this test was failing on Windows (GH #1950)
@@ -252,6 +321,24 @@ SCENARIO("Circle Fit, TaubinFit with Newton's method", "[Geometry]") {
     }
 }
 
+TEST_CASE("smallest_enclosing_circle_welzl", "[Geometry]") {
+    // Some random points in plane.
+    Points pts { 
+        { 89243, 4359 }, { 763465, 59687 }, { 3245, 734987 }, { 2459867, 987634 }, { 759866, 67843982 }, { 9754687, 9834658 }, { 87235089, 743984373 }, 
+        { 65874456, 2987546 }, { 98234524, 657654873 }, { 786243598, 287934765 }, { 824356, 734265 }, { 82576449, 7864534 }, { 7826345, 3984765 }
+    };
+
+    const auto c = Slic3r::Geometry::smallest_enclosing_circle_welzl(pts);
+    // The radius returned is inflated by SCALED_EPSILON, thus all points should be inside.
+    bool all_inside = std::all_of(pts.begin(), pts.end(), [c](const Point &pt){ return c.contains(pt.cast<double>()); });
+    auto c2(c);
+    c2.radius -= SCALED_EPSILON * 2.1;
+    auto num_on_boundary = std::count_if(pts.begin(), pts.end(), [c2](const Point& pt) { return ! c2.contains(pt.cast<double>(), SCALED_EPSILON); });
+
+    REQUIRE(all_inside);
+    REQUIRE(num_on_boundary == 3);
+}
+
 SCENARIO("Path chaining", "[Geometry]") {
 	GIVEN("A path") {
 		std::vector<Point> points = { Point(26,26),Point(52,26),Point(0,26),Point(26,52),Point(26,0),Point(0,52),Point(52,52),Point(52,0) };
@@ -450,5 +537,227 @@ SCENARIO("Ported from xs/t/14_geometry.t", "[Geometry]"){
     	REQUIRE(Slic3r::Geometry::directions_parallel(0, M_PI, M_PI / 180));
     	REQUIRE(! Slic3r::Geometry::directions_parallel(M_PI /2, M_PI, 0));
     	REQUIRE(! Slic3r::Geometry::directions_parallel(M_PI /2, PI, M_PI /180));
+    }
+}
+
+TEST_CASE("Convex polygon intersection on two disjoint squares", "[Geometry][Rotcalip]") {
+    Polygon A{{0, 0}, {10, 0}, {10, 10}, {0, 10}};
+    A.scale(1. / SCALING_FACTOR);
+
+    Polygon B = A;
+    B.translate(20 / SCALING_FACTOR, 0);
+
+    bool is_inters = Geometry::convex_polygons_intersect(A, B);
+
+    REQUIRE(is_inters == false);
+}
+
+TEST_CASE("Convex polygon intersection on two intersecting squares", "[Geometry][Rotcalip]") {
+    Polygon A{{0, 0}, {10, 0}, {10, 10}, {0, 10}};
+    A.scale(1. / SCALING_FACTOR);
+
+    Polygon B = A;
+    B.translate(5 / SCALING_FACTOR, 5 / SCALING_FACTOR);
+
+    bool is_inters = Geometry::convex_polygons_intersect(A, B);
+
+    REQUIRE(is_inters == true);
+}
+
+TEST_CASE("Convex polygon intersection on two squares touching one edge", "[Geometry][Rotcalip]") {
+    Polygon A{{0, 0}, {10, 0}, {10, 10}, {0, 10}};
+    A.scale(1. / SCALING_FACTOR);
+
+    Polygon B = A;
+    B.translate(10 / SCALING_FACTOR, 0);
+
+    bool is_inters = Geometry::convex_polygons_intersect(A, B);
+
+    REQUIRE(is_inters == false);
+}
+
+TEST_CASE("Convex polygon intersection on two squares touching one vertex", "[Geometry][Rotcalip]") {
+    Polygon A{{0, 0}, {10, 0}, {10, 10}, {0, 10}};
+    A.scale(1. / SCALING_FACTOR);
+
+    Polygon B = A;
+    B.translate(10 / SCALING_FACTOR, 10 / SCALING_FACTOR);
+
+    SVG svg{std::string("one_vertex_touch") + ".svg"};
+    svg.draw(A, "blue");
+    svg.draw(B, "green");
+    svg.Close();
+
+    bool is_inters = Geometry::convex_polygons_intersect(A, B);
+
+    REQUIRE(is_inters == false);
+}
+
+TEST_CASE("Convex polygon intersection on two overlapping squares", "[Geometry][Rotcalip]") {
+    Polygon A{{0, 0}, {10, 0}, {10, 10}, {0, 10}};
+    A.scale(1. / SCALING_FACTOR);
+
+    Polygon B = A;
+
+    bool is_inters = Geometry::convex_polygons_intersect(A, B);
+
+    REQUIRE(is_inters == true);
+}
+
+//// Only for benchmarking
+//static Polygon gen_convex_poly(std::mt19937_64 &rg, size_t point_cnt)
+//{
+//    std::uniform_int_distribution<coord_t> dist(0, 100);
+
+//    Polygon out;
+//    out.points.reserve(point_cnt);
+
+//    coord_t tr = dist(rg) * 2 / SCALING_FACTOR;
+
+//    for (size_t i = 0; i < point_cnt; ++i)
+//        out.points.emplace_back(tr + dist(rg) / SCALING_FACTOR,
+//                                tr + dist(rg) / SCALING_FACTOR);
+
+//    return Geometry::convex_hull(out.points);
+//}
+//TEST_CASE("Convex polygon intersection test on random polygons", "[Geometry]") {
+//    constexpr size_t TEST_CNT = 1000;
+//    constexpr size_t POINT_CNT = 1000;
+
+//    auto seed = std::random_device{}();
+////    unsigned long seed = 2525634386;
+//    std::mt19937_64 rg{seed};
+//    Benchmark bench;
+
+//    auto tests = reserve_vector<std::pair<Polygon, Polygon>>(TEST_CNT);
+//    auto results = reserve_vector<bool>(TEST_CNT);
+//    auto expects = reserve_vector<bool>(TEST_CNT);
+
+//    for (size_t i = 0; i < TEST_CNT; ++i) {
+//        tests.emplace_back(gen_convex_poly(rg, POINT_CNT), gen_convex_poly(rg, POINT_CNT));
+//    }
+
+//    bench.start();
+//    for (const auto &test : tests)
+//        results.emplace_back(Geometry::convex_polygons_intersect(test.first, test.second));
+//    bench.stop();
+
+//    std::cout << "Test time: " << bench.getElapsedSec() << std::endl;
+
+//    bench.start();
+//    for (const auto &test : tests)
+//        expects.emplace_back(!intersection(test.first, test.second).empty());
+//    bench.stop();
+
+//    std::cout << "Clipper time: " << bench.getElapsedSec() << std::endl;
+
+//    REQUIRE(results.size() == expects.size());
+
+//    auto seedstr = std::to_string(seed);
+//    for (size_t i = 0; i < results.size(); ++i) {
+//        // std::cout << expects[i] << " ";
+
+//        if (results[i] != expects[i]) {
+//            SVG svg{std::string("fail_seed") + seedstr + "_" + std::to_string(i) + ".svg"};
+//            svg.draw(tests[i].first, "blue");
+//            svg.draw(tests[i].second, "green");
+//            svg.Close();
+
+//            // std::cout << std::endl;
+//        }
+//        REQUIRE(results[i] == expects[i]);
+//    }
+//    std::cout << std::endl;
+
+//}
+
+struct Pair
+{
+    size_t first, second;
+    bool operator==(const Pair &b) const { return first == b.first && second == b.second; }
+};
+
+template<> struct std::hash<Pair> {
+    size_t operator()(const Pair &c) const
+    {
+        return c.first * PRINTER_PART_POLYGONS.size() + c.second;
+    }
+};
+
+TEST_CASE("Convex polygon intersection test prusa polygons", "[Geometry][Rotcalip]") {
+
+    // Overlap of the same polygon should always be an intersection
+    for (size_t i = 0; i < PRINTER_PART_POLYGONS.size(); ++i) {
+        Polygon P = PRINTER_PART_POLYGONS[i];
+        P = Geometry::convex_hull(P.points);
+        bool res = Geometry::convex_polygons_intersect(P, P);
+        if (!res) {
+            SVG svg{std::string("fail_self") + std::to_string(i) + ".svg"};
+            svg.draw(P, "green");
+            svg.Close();
+        }
+        REQUIRE(res == true);
+    }
+
+    std::unordered_set<Pair> combos;
+    for (size_t i = 0; i < PRINTER_PART_POLYGONS.size(); ++i) {
+        for (size_t j = 0; j < PRINTER_PART_POLYGONS.size(); ++j) {
+            if (i != j) {
+                size_t a = std::min(i, j), b = std::max(i, j);
+                combos.insert(Pair{a, b});
+            }
+        }
+    }
+
+    // All disjoint
+    for (const auto &combo : combos) {
+        Polygon A = PRINTER_PART_POLYGONS[combo.first], B = PRINTER_PART_POLYGONS[combo.second];
+        A = Geometry::convex_hull(A.points);
+        B = Geometry::convex_hull(B.points);
+
+        auto bba = A.bounding_box();
+        auto bbb = B.bounding_box();
+
+        A.translate(-bba.center());
+        B.translate(-bbb.center());
+
+        B.translate(bba.size() + bbb.size());
+
+        bool res = Geometry::convex_polygons_intersect(A, B);
+        bool ref = !intersection(A, B).empty();
+
+        if (res != ref) {
+            SVG svg{std::string("fail") + std::to_string(combo.first) + "_" + std::to_string(combo.second) + ".svg"};
+            svg.draw(A, "blue");
+            svg.draw(B, "green");
+            svg.Close();
+        }
+
+        REQUIRE(res == ref);
+    }
+
+    // All intersecting
+    for (const auto &combo : combos) {
+        Polygon A = PRINTER_PART_POLYGONS[combo.first], B = PRINTER_PART_POLYGONS[combo.second];
+        A = Geometry::convex_hull(A.points);
+        B = Geometry::convex_hull(B.points);
+
+        auto bba = A.bounding_box();
+        auto bbb = B.bounding_box();
+
+        A.translate(-bba.center());
+        B.translate(-bbb.center());
+
+        bool res = Geometry::convex_polygons_intersect(A, B);
+        bool ref = !intersection(A, B).empty();
+
+        if (res != ref) {
+            SVG svg{std::string("fail") + std::to_string(combo.first) + "_" + std::to_string(combo.second) + ".svg"};
+            svg.draw(A, "blue");
+            svg.draw(B, "green");
+            svg.Close();
+        }
+
+        REQUIRE(res == ref);
     }
 }

@@ -228,7 +228,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxDEFAULT_FRAME_S
                 return;
             }
             // check unsaved changes only if project wasn't saved
-            else if (saved_project == wxID_NO && event.CanVeto() && 
+            else if (plater()->is_project_dirty() && saved_project == wxID_NO && event.CanVeto() &&
                      !wxGetApp().check_and_save_current_preset_changes(_L("PrusaSlicer is closing"), _L("Closing PrusaSlicer while some presets are modified."))) {
                 event.Veto();
                 return;
@@ -834,7 +834,7 @@ bool MainFrame::can_save() const
 #if ENABLE_SAVE_COMMANDS_ALWAYS_ENABLED
     return (m_plater != nullptr) &&
         !m_plater->canvas3D()->get_gizmos_manager().is_in_editing_mode(false) &&
-        !m_plater->get_project_filename().empty() && m_plater->is_project_dirty();
+        m_plater->is_project_dirty();
 #else
     return (m_plater != nullptr) && !m_plater->model().objects.empty() &&
         !m_plater->canvas3D()->get_gizmos_manager().is_in_editing_mode(false) &&
@@ -1400,7 +1400,7 @@ void MainFrame::init_menubar_as_editor()
         }
 
         windowMenu->AppendSeparator();
-        append_menu_item(windowMenu, wxID_ANY, _L("Modify Shapes Gallery"), _L("Open the dialog to modify shapes gallery"),
+        append_menu_item(windowMenu, wxID_ANY, _L("Shape Gallery"), _L("Open the dialog to modify shape gallery"),
             [this](wxCommandEvent&) { 
                 GalleryDialog dlg(this, true);
                 if (dlg.ShowModal() == wxID_OK) {

@@ -138,14 +138,14 @@ Transform3d SLAPrint::sla_trafo(const ModelObject &model_object) const
     offset(1) = 0.;
     rotation(2) = 0.;
 
-    offset(Z) *= corr(Z);
+    offset.z() *= corr.z();
 
     auto trafo = Transform3d::Identity();
     trafo.translate(offset);
     trafo.scale(corr);
-    trafo.rotate(Eigen::AngleAxisd(rotation(2), Vec3d::UnitZ()));
-    trafo.rotate(Eigen::AngleAxisd(rotation(1), Vec3d::UnitY()));
-    trafo.rotate(Eigen::AngleAxisd(rotation(0), Vec3d::UnitX()));
+    trafo.rotate(Eigen::AngleAxisd(rotation.z(), Vec3d::UnitZ()));
+    trafo.rotate(Eigen::AngleAxisd(rotation.y(), Vec3d::UnitY()));
+    trafo.rotate(Eigen::AngleAxisd(rotation.x(), Vec3d::UnitX()));
     trafo.scale(model_instance.get_scaling_factor());
     trafo.scale(model_instance.get_mirror());
 
@@ -1216,7 +1216,7 @@ DynamicConfig SLAPrintStatistics::config() const
 DynamicConfig SLAPrintStatistics::placeholders()
 {
     DynamicConfig config;
-    for (const std::string &key : {
+    for (const char *key : {
         "print_time", "total_cost", "total_weight",
         "objects_used_material", "support_used_material" })
         config.set_key_value(key, new ConfigOptionString(std::string("{") + key + "}"));

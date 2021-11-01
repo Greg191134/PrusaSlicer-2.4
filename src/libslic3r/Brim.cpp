@@ -50,7 +50,7 @@ static ExPolygons get_print_object_bottom_layer_expolygons(const PrintObject &pr
 {
     ExPolygons ex_polygons;
     for (LayerRegion *region : print_object.layers().front()->regions())
-        Slic3r::append(ex_polygons, offset_ex(offset_ex(region->slices.surfaces, float(SCALED_EPSILON)), -float(SCALED_EPSILON)));
+        Slic3r::append(ex_polygons, closing_ex(region->slices.surfaces, float(SCALED_EPSILON)));
     return ex_polygons;
 }
 
@@ -114,6 +114,7 @@ static ConstPrintObjectPtrs get_top_level_objects_with_brim(const Print &print, 
     clipper.AddPaths(islands_clip, ClipperLib_Z::ptSubject, true);
     // Execute union operation to construct polytree
     ClipperLib_Z::PolyTree islands_polytree;
+    //FIXME likely pftNonZero or ptfPositive would be better. Why are we using ptfEvenOdd for Unions?
     clipper.Execute(ClipperLib_Z::ctUnion, islands_polytree, ClipperLib_Z::pftEvenOdd, ClipperLib_Z::pftEvenOdd);
 
     std::unordered_set<size_t> processed_objects_idx;
@@ -177,7 +178,7 @@ static ExPolygons top_level_outer_brim_area(const Print                   &print
                 append(brim_area_object, diff_ex(offset(ex_poly.contour, brim_width + brim_separation, ClipperLib::jtSquare), offset(ex_poly.contour, brim_separation, ClipperLib::jtSquare)));
 
             if (brim_type == BrimType::btOuterOnly || brim_type == BrimType::btNoBrim)
-                append(no_brim_area_object, offset_ex(ex_poly.holes, -no_brim_offset, ClipperLib::jtSquare));
+                append(no_brim_area_object, shrink_ex(ex_poly.holes, no_brim_offset, ClipperLib::jtSquare));
 
             if (brim_type == BrimType::btInnerOnly || brim_type == BrimType::btNoBrim)
                 append(no_brim_area_object, diff_ex(offset(ex_poly.contour, no_brim_offset, ClipperLib::jtSquare), ex_poly.holes));
@@ -230,13 +231,13 @@ static ExPolygons inner_brim_area(const Print                   &print,
             }
 
             if (brim_type == BrimType::btInnerOnly || brim_type == BrimType::btOuterAndInner)
-                append(brim_area_object, diff_ex(offset_ex(ex_poly.holes, -brim_separation, ClipperLib::jtSquare), offset_ex(ex_poly.holes, -brim_width - brim_separation, ClipperLib::jtSquare)));
+                append(brim_area_object, diff_ex(shrink_ex(ex_poly.holes, brim_separation, ClipperLib::jtSquare), shrink_ex(ex_poly.holes, brim_width + brim_separation, ClipperLib::jtSquare)));
 
             if (brim_type == BrimType::btInnerOnly || brim_type == BrimType::btNoBrim)
                 append(no_brim_area_object, diff_ex(offset(ex_poly.contour, no_brim_offset, ClipperLib::jtSquare), ex_poly.holes));
 
             if (brim_type == BrimType::btOuterOnly || brim_type == BrimType::btNoBrim)
-                append(no_brim_area_object, offset_ex(ex_poly.holes, -no_brim_offset, ClipperLib::jtSquare));
+                append(no_brim_area_object, shrink_ex(ex_poly.holes, no_brim_offset, ClipperLib::jtSquare));
 
             append(holes_object, ex_poly.holes);
         }
@@ -385,10 +386,10 @@ ExtrusionEntityCollection make_brim(const Print &print, PrintTryCancel try_cance
     size_t          num_loops = size_t(floor(max_brim_width(print.objects()) / flow.spacing()));
     for (size_t i = 0; i < num_loops; ++i) {
         try_cancel();
-        islands = offset(islands, float(flow.scaled_spacing()), ClipperLib::jtSquare);
+        islands = expand(islands, float(flow.scaled_spacing()), ClipperLib::jtSquare);
         for (Polygon &poly : islands) 
             poly.douglas_peucker(SCALED_RESOLUTION);
-        polygons_append(loops, offset(islands, -0.5f * float(flow.scaled_spacing())));
+        polygons_append(loops, shrink(islands, 0.5f * float(flow.scaled_spacing())));
     }
     loops = union_pt_chained_outside_in(loops);
 
@@ -486,7 +487,7 @@ ExtrusionEntityCollection make_brim(const Print &print, PrintTryCancel try_cance
 		    clipper.AddPaths(input_subject, ClipperLib_Z::ptSubject, true);
 		    clipper.AddPaths(input_clip,    ClipperLib_Z::ptClip,    true);
 		    // perform operation
-		    clipper.Execute(ClipperLib_Z::ctDifference, trimming, ClipperLib_Z::pftEvenOdd, ClipperLib_Z::pftEvenOdd);
+		    clipper.Execute(ClipperLib_Z::ctDifference, trimming, ClipperLib_Z::pftNonZero, ClipperLib_Z::pftNonZero);
 		}
 
 		// Second, trim the extrusion loops with the trimming regions.
@@ -515,7 +516,7 @@ ExtrusionEntityCollection make_brim(const Print &print, PrintTryCancel try_cance
 			clipper.AddPaths(trimming,   ClipperLib_Z::ptClip,    true);
 			// perform operation
 			ClipperLib_Z::PolyTree loops_trimmed_tree;
-			clipper.Execute(ClipperLib_Z::ctDifference, loops_trimmed_tree, ClipperLib_Z::pftEvenOdd, ClipperLib_Z::pftEvenOdd);
+			clipper.Execute(ClipperLib_Z::ctDifference, loops_trimmed_tree, ClipperLib_Z::pftNonZero, ClipperLib_Z::pftNonZero);
 			ClipperLib_Z::PolyTreeToPaths(loops_trimmed_tree, loops_trimmed);
 		}
 

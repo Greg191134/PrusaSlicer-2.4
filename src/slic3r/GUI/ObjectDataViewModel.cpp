@@ -1777,6 +1777,23 @@ void ObjectDataViewModel::DeleteWarningIcon(const wxDataViewItem& item, const bo
     }
 }
 
+bool ObjectDataViewModel::HasWarningIcon(const wxDataViewItem& item) const
+{
+    if (!item.IsOk())
+        return false;
+
+    ObjectDataViewModelNode *node = static_cast<ObjectDataViewModelNode*>(item.GetID());
+    return node->has_warning_icon();
+}
+
+void ObjectDataViewModel::UpdateWarningIcon(const wxDataViewItem& item, const std::string& warning_icon_name)
+{
+    if (warning_icon_name.empty())
+        DeleteWarningIcon(item, true);
+    else
+        AddWarningIcon(item, warning_icon_name);
+}
+
 } // namespace GUI
 } // namespace Slic3r
 

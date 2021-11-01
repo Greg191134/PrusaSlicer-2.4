@@ -127,13 +127,14 @@ int TriangleSelector::select_unsplit_triangle(const Vec3f &hit, int facet_idx) c
 void TriangleSelector::select_patch(const Vec3f& hit, int facet_start,
                                     const Vec3f& source, float radius,
                                     CursorType cursor_type, EnforcerBlockerType new_state,
-                                    const Transform3d& trafo, bool triangle_splitting)
+                                    const Transform3d& trafo, const Transform3d& trafo_no_translate,
+                                    bool triangle_splitting, const ClippingPlane &clp, float highlight_by_angle_deg)
 {
     assert(facet_start < m_orig_size_indices);
 
     // Save current cursor center, squared radius and camera direction, so we don't
     // have to pass it around.
-    m_cursor = Cursor(hit, source, radius, cursor_type, trafo);
+    m_cursor = Cursor(hit, source, radius, cursor_type, trafo, clp);
 
     // In case user changed cursor size since last time, update triangle edge limit.
     // It is necessary to compare the internal radius in m_cursor! radius is in
@@ -142,6 +143,9 @@ void TriangleSelector::select_patch(const Vec3f& hit, int facet_start,
         set_edge_limit(std::sqrt(m_cursor.radius_sqr) / 5.f);
         m_old_cursor_radius_sqr = m_cursor.radius_sqr;
     }
+
+    const float highlight_angle_limit = cos(Geometry::deg2rad(highlight_by_angle_deg));
+    Vec3f       vec_down              = (trafo_no_translate.inverse() * -Vec3d::UnitZ()).normalized().cast<float>();
 
     // Now start with the facet the pointer points to and check all adjacent facets.
     std::vector<int> facets_to_check;
@@ -153,14 +157,14 @@ void TriangleSelector::select_patch(const Vec3f& hit, int facet_start,
     // Head of the bread-first facets_to_check FIFO.
     int facet_idx = 0;
     while (facet_idx < int(facets_to_check.size())) {
-        int facet = facets_to_check[facet_idx];
-        if (! visited[facet]) {
+        int          facet        = facets_to_check[facet_idx];
+        const Vec3f &facet_normal = m_face_normals[m_triangles[facet].source_triangle];
+        if (!visited[facet] && (highlight_by_angle_deg == 0.f || vec_down.dot(facet_normal) >= highlight_angle_limit)) {
             if (select_triangle(facet, new_state, triangle_splitting)) {
-                // add neighboring facets to list to be proccessed later
-                for (int neighbor_idx : m_neighbors[facet]) {
-                    if (neighbor_idx >=0 && (m_cursor.type == SPHERE || faces_camera(neighbor_idx)))
+                // add neighboring facets to list to be processed later
+                for (int neighbor_idx : m_neighbors[facet])
+                    if (neighbor_idx >= 0 && (m_cursor.type == SPHERE || faces_camera(neighbor_idx)))
                         facets_to_check.push_back(neighbor_idx);
-                }
             }
         }
         visited[facet] = true;
@@ -168,12 +172,23 @@ void TriangleSelector::select_patch(const Vec3f& hit, int facet_start,
     }
 }
 
-void TriangleSelector::seed_fill_select_triangles(const Vec3f &hit, int facet_start, float seed_fill_angle, bool force_reselection)
+bool TriangleSelector::is_facet_clipped(int facet_idx, const ClippingPlane &clp) const
+{
+    for (int vert_idx : m_triangles[facet_idx].verts_idxs)
+        if (clp.is_active() && clp.is_mesh_point_clipped(m_vertices[vert_idx].v))
+            return true;
+
+    return false;
+}
+
+void TriangleSelector::seed_fill_select_triangles(const Vec3f &hit, int facet_start, const Transform3d& trafo_no_translate,
+                                                  const ClippingPlane &clp, float seed_fill_angle, float highlight_by_angle_deg,
+                                                  bool force_reselection)
 {
     assert(facet_start < m_orig_size_indices);
 
-    // Recompute seed fill only if the cursor is pointing on facet unselected by seed fill.
-    if (int start_facet_idx = select_unsplit_triangle(hit, facet_start); start_facet_idx >= 0 && m_triangles[start_facet_idx].is_selected_by_seed_fill() && !force_reselection)
+    // Recompute seed fill only if the cursor is pointing on facet unselected by seed fill or a clipping plane is active.
+    if (int start_facet_idx = select_unsplit_triangle(hit, facet_start); start_facet_idx >= 0 && m_triangles[start_facet_idx].is_selected_by_seed_fill() && !force_reselection && !clp.is_active())
         return;
 
     this->seed_fill_unselect_all_triangles();
@@ -182,14 +197,17 @@ void TriangleSelector::seed_fill_select_triangles(const Vec3f &hit, int facet_st
     std::queue<int>   facet_queue;
     facet_queue.push(facet_start);
 
-    const double facet_angle_limit = cos(Geometry::deg2rad(seed_fill_angle)) - EPSILON;
+    const double facet_angle_limit     = cos(Geometry::deg2rad(seed_fill_angle)) - EPSILON;
+    const float  highlight_angle_limit = cos(Geometry::deg2rad(highlight_by_angle_deg));
+    Vec3f        vec_down              = (trafo_no_translate.inverse() * -Vec3d::UnitZ()).normalized().cast<float>();
 
     // Depth-first traversal of neighbors of the face hit by the ray thrown from the mouse cursor.
     while (!facet_queue.empty()) {
         int current_facet = facet_queue.front();
         facet_queue.pop();
 
-        if (!visited[current_facet]) {
+        const Vec3f &facet_normal = m_face_normals[m_triangles[current_facet].source_triangle];
+        if (!visited[current_facet] && (highlight_by_angle_deg == 0.f || vec_down.dot(facet_normal) >= highlight_angle_limit)) {
             if (m_triangles[current_facet].is_split()) {
                 for (int split_triangle_idx = 0; split_triangle_idx <= m_triangles[current_facet].number_of_split_sides(); ++split_triangle_idx) {
                     assert(split_triangle_idx < int(m_triangles[current_facet].children.size()));
@@ -205,7 +223,7 @@ void TriangleSelector::seed_fill_select_triangles(const Vec3f &hit, int facet_st
                 // Propagate over the original triangles.
                 for (int neighbor_idx : m_neighbors[current_facet]) {
                     assert(neighbor_idx >= -1);
-                    if (neighbor_idx >= 0 && !visited[neighbor_idx]) {
+                    if (neighbor_idx >= 0 && !visited[neighbor_idx] && !is_facet_clipped(neighbor_idx, clp)) {
                         // Check if neighbour_facet_idx is satisfies angle in seed_fill_angle and append it to facet_queue if it do.
                         const Vec3f &n1 = m_face_normals[m_triangles[neighbor_idx].source_triangle];
                         const Vec3f &n2 = m_face_normals[m_triangles[current_facet].source_triangle];
@@ -321,12 +339,12 @@ void TriangleSelector::append_touching_edges(int itriangle, int vertexi, int ver
         process_subtriangle(touching.second, Partition::Second);
 }
 
-void TriangleSelector::bucket_fill_select_triangles(const Vec3f& hit, int facet_start, bool propagate, bool force_reselection)
+void TriangleSelector::bucket_fill_select_triangles(const Vec3f& hit, int facet_start, const ClippingPlane &clp, bool propagate, bool force_reselection)
 {
     int start_facet_idx = select_unsplit_triangle(hit, facet_start);
     assert(start_facet_idx != -1);
-    // Recompute bucket fill only if the cursor is pointing on facet unselected by bucket fill.
-    if (start_facet_idx == -1 || (m_triangles[start_facet_idx].is_selected_by_seed_fill() && !force_reselection))
+    // Recompute bucket fill only if the cursor is pointing on facet unselected by bucket fill or a clipping plane is active.
+    if (start_facet_idx == -1 || (m_triangles[start_facet_idx].is_selected_by_seed_fill() && !force_reselection && !clp.is_active()))
         return;
 
     assert(!m_triangles[start_facet_idx].is_split());
@@ -369,7 +387,7 @@ void TriangleSelector::bucket_fill_select_triangles(const Vec3f& hit, int facet_
 
             std::vector<int> touching_triangles = get_all_touching_triangles(current_facet, neighbors[current_facet], neighbors_propagated[current_facet]);
             for(const int tr_idx : touching_triangles) {
-                if (tr_idx < 0 || visited[tr_idx] || m_triangles[tr_idx].get_state() != start_facet_state)
+                if (tr_idx < 0 || visited[tr_idx] || m_triangles[tr_idx].get_state() != start_facet_state || is_facet_clipped(tr_idx, clp))
                     continue;
 
                 assert(!m_triangles[tr_idx].is_split());
@@ -1677,11 +1695,12 @@ void TriangleSelector::seed_fill_apply_on_triangles(EnforcerBlockerType new_stat
 
 TriangleSelector::Cursor::Cursor(
         const Vec3f& center_, const Vec3f& source_, float radius_world,
-        CursorType type_, const Transform3d& trafo_)
+        CursorType type_, const Transform3d& trafo_, const ClippingPlane &clipping_plane_)
     : center{center_},
       source{source_},
       type{type_},
-      trafo{trafo_.cast<float>()}
+      trafo{trafo_.cast<float>()},
+      clipping_plane(clipping_plane_)
 {
     Vec3d sf = Geometry::Transformation(trafo_).get_scaling_factor();
     if (is_approx(sf(0), sf(1)) && is_approx(sf(1), sf(2))) {
@@ -1704,21 +1723,18 @@ TriangleSelector::Cursor::Cursor(
     dir = (center - source).normalized();
 }
 
-
 // Is a point (in mesh coords) inside a cursor?
-bool TriangleSelector::Cursor::is_mesh_point_inside(Vec3f point) const
+bool TriangleSelector::Cursor::is_mesh_point_inside(const Vec3f &point) const
 {
-    if (! uniform_scaling)
-        point = trafo * point;
+    const Vec3f transformed_point = uniform_scaling ? point : Vec3f(trafo * point);
+    const Vec3f diff              = center - transformed_point;
+    const bool  is_point_inside   = (type == CIRCLE ? (diff - diff.dot(dir) * dir).squaredNorm() : diff.squaredNorm()) < radius_sqr;
 
-     Vec3f diff = center - point;
-     return (type == CIRCLE ?
-                (diff - diff.dot(dir) * dir).squaredNorm() :
-                 diff.squaredNorm())
-            < radius_sqr;
+    if (is_point_inside && clipping_plane.is_active())
+        return !clipping_plane.is_mesh_point_clipped(point);
+
+    return is_point_inside;
 }
-
-
 
 // p1, p2, p3 are in mesh coords!
 bool TriangleSelector::Cursor::is_pointer_in_triangle(const Vec3f& p1_,

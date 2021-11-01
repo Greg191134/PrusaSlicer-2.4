@@ -1735,6 +1735,18 @@ void TabPrint::update()
 
     m_update_cnt++;
 
+    // see https://github.com/prusa3d/PrusaSlicer/issues/6814
+    // ysFIXME: It's temporary workaround and should be clewer reworked:
+    // Note: This workaround works till "support_material" and "overhangs" is exclusive sets of mutually no-exclusive parameters.
+    // But it should be corrected when we will have more such sets.
+    // Disable check of the compatibility of the "support_material" and "overhangs" options for saved user profile
+    if (!m_config_manipulation.is_initialized_support_material_overhangs_queried()) {
+        const Preset& selected_preset = m_preset_bundle->prints.get_selected_preset();
+        bool is_user_and_saved_preset = !selected_preset.is_system && !selected_preset.is_dirty;
+        bool support_material_overhangs_queried = m_config->opt_bool("support_material") && !m_config->opt_bool("overhangs");
+        m_config_manipulation.initialize_support_material_overhangs_queried(is_user_and_saved_preset && support_material_overhangs_queried);
+    }
+
     m_config_manipulation.update_print_fff_config(m_config, true);
 
     update_description_lines();
@@ -3236,7 +3248,7 @@ void Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
 		const PresetWithVendorProfile new_printer_preset_with_vendor_profile = m_presets->get_preset_with_vendor_profile(new_printer_preset);
         PrinterTechnology    old_printer_technology = m_presets->get_edited_preset().printer_technology();
         PrinterTechnology    new_printer_technology = new_printer_preset.printer_technology();
-        if (new_printer_technology == ptSLA && old_printer_technology == ptFFF && !may_switch_to_SLA_preset())
+        if (new_printer_technology == ptSLA && old_printer_technology == ptFFF && !wxGetApp().may_switch_to_SLA_preset(_L("New printer preset is selecting")))
             canceled = true;
         else {
             struct PresetUpdate {
@@ -3406,21 +3418,6 @@ bool Tab::may_discard_current_dirty_preset(PresetCollection* presets /*= nullptr
             wxGetApp().get_tab(presets->type())->cache_config_diff(selected_options);
     }
 
-    return true;
-}
-
-// If we are switching from the FFF-preset to the SLA, we should to control the printed objects if they have a part(s).
-// Because of we can't to print the multi-part objects with SLA technology.
-bool Tab::may_switch_to_SLA_preset()
-{
-    if (model_has_multi_part_objects(wxGetApp().model()))
-    {
-        show_info( parent(),
-                    _(L("It's impossible to print multi-part object(s) with SLA technology.")) + "\n\n" +
-                    _(L("Please check your object list before preset changing.")),
-                    _(L("Attention!")) );
-        return false;
-    }
     return true;
 }
 

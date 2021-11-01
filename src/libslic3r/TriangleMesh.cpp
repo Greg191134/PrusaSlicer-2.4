@@ -66,8 +66,9 @@ TriangleMesh::TriangleMesh(const indexed_triangle_set &its) : its(its)
     fill_initial_stats(this->its, m_stats);
 }
 
-TriangleMesh::TriangleMesh(indexed_triangle_set &&its) : its(std::move(its))
+TriangleMesh::TriangleMesh(indexed_triangle_set &&its, const RepairedMeshErrors& errors/* = RepairedMeshErrors()*/) : its(std::move(its))
 {
+    m_stats.repaired_errors = errors;
     fill_initial_stats(this->its, m_stats);
 }
 
@@ -194,11 +195,12 @@ bool TriangleMesh::ReadSTLFile(const char* input_file, bool repair)
     auto facets_w_3_bad_edge = stl.stats.number_of_facets - stl.stats.connected_facets_1_edge;
     m_stats.open_edges              = stl.stats.backwards_edges + facets_w_1_bad_edge + facets_w_2_bad_edge * 2 + facets_w_3_bad_edge * 3;
 
-    m_stats.edges_fixed             = stl.stats.edges_fixed;
-    m_stats.degenerate_facets       = stl.stats.degenerate_facets;
-    m_stats.facets_removed          = stl.stats.facets_removed;
-    m_stats.facets_reversed         = stl.stats.facets_reversed;
-    m_stats.backwards_edges         = stl.stats.backwards_edges;
+    m_stats.repaired_errors = { stl.stats.edges_fixed,
+                                stl.stats.degenerate_facets,
+                                stl.stats.facets_removed,
+                                stl.stats.facets_reversed,
+                                stl.stats.backwards_edges };
+
     m_stats.number_of_parts         = stl.stats.number_of_parts;
 
     stl_generate_shared_vertices(&stl, this->its);
@@ -433,87 +435,36 @@ BoundingBoxf3 TriangleMesh::transformed_bounding_box(const Transform3d &trafo) c
     return bbox;
 }
 
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+BoundingBoxf3 TriangleMesh::transformed_bounding_box(const Transform3d& trafo, double world_min_z) const
+{
+    BoundingBoxf3 bbox;
+    const Transform3f ftrafo = trafo.cast<float>();
+    for (const stl_triangle_vertex_indices& tri : its.indices) {
+        const Vec3f pts[3] = { ftrafo * its.vertices[tri(0)], ftrafo * its.vertices[tri(1)], ftrafo * its.vertices[tri(2)] };
+        int iprev = 2;
+        for (int iedge = 0; iedge < 3; ++iedge) {
+            const Vec3f& p1 = pts[iprev];
+            const Vec3f& p2 = pts[iedge];
+            if ((p1.z() < world_min_z && p2.z() > world_min_z) || (p2.z() < world_min_z && p1.z() > world_min_z)) {
+                // Edge crosses the z plane. Calculate intersection point with the plane.
+                const float t = (world_min_z - p1.z()) / (p2.z() - p1.z());
+                bbox.merge(Vec3f(p1.x() + (p2.x() - p1.x()) * t, p1.y() + (p2.y() - p1.y()) * t, world_min_z).cast<double>());
+            }
+            if (p2.z() >= world_min_z)
+                bbox.merge(p2.cast<double>());
+            iprev = iedge;
+        }
+    }
+    return bbox;
+}
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+
 TriangleMesh TriangleMesh::convex_hull_3d() const
 {
-    // The qhull call:
-    orgQhull::Qhull qhull;
-    qhull.disableOutputStream(); // we want qhull to be quiet
-    std::vector<realT> src_vertices;
-    try
-    {
-#if REALfloat
-        qhull.runQhull("", 3, (int)this->its.vertices.size(), (const realT*)(this->its.vertices.front().data()), "Qt");
-#else
-        src_vertices.reserve(this->its.vertices.size() * 3);
-        // We will now fill the vector with input points for computation:
-        for (const stl_vertex &v : this->its.vertices)
-            for (int i = 0; i < 3; ++ i)
-                src_vertices.emplace_back(v(i));
-        qhull.runQhull("", 3, (int)src_vertices.size() / 3, src_vertices.data(), "Qt");
-#endif
-    }
-    catch (...)
-    {
-        std::cout << "Unable to create convex hull" << std::endl;
-        return TriangleMesh();
-    }
-
-    // Let's collect results:
-    std::vector<Vec3f>  dst_vertices;
-    std::vector<Vec3i>  dst_facets;
-    // Map of QHull's vertex ID to our own vertex ID (pointing to dst_vertices).
-    std::vector<int>    map_dst_vertices;
-#ifndef NDEBUG
-    Vec3f               centroid = Vec3f::Zero();
-    for (const stl_vertex& pt : this->its.vertices)
-        centroid += pt;
-    centroid /= float(this->its.vertices.size());
-#endif // NDEBUG
-    for (const orgQhull::QhullFacet facet : qhull.facetList()) {
-        // Collect face vertices first, allocate unique vertices in dst_vertices based on QHull's vertex ID.
-        Vec3i  indices;
-        int    cnt = 0;
-        for (const orgQhull::QhullVertex vertex : facet.vertices()) {
-            int id = vertex.id();
-            assert(id >= 0);
-            if (id >= int(map_dst_vertices.size()))
-                map_dst_vertices.resize(next_highest_power_of_2(size_t(id + 1)), -1);
-            if (int i = map_dst_vertices[id]; i == -1) {
-                // Allocate a new vertex.
-                i = int(dst_vertices.size());
-                map_dst_vertices[id] = i;
-                orgQhull::QhullPoint pt(vertex.point());
-                dst_vertices.emplace_back(pt[0], pt[1], pt[2]);
-                indices[cnt] = i;
-            } else {
-                // Reuse existing vertex.
-                indices[cnt] = i;
-            }
-            if (cnt ++ == 3)
-                break;
-        }
-        assert(cnt == 3);
-        if (cnt == 3) {
-            // QHull sorts vertices of a face lexicographically by their IDs, not by face normals.
-            // Calculate face normal based on the order of vertices.
-            Vec3f n  = (dst_vertices[indices(1)] - dst_vertices[indices(0)]).cross(dst_vertices[indices(2)] - dst_vertices[indices(1)]);
-            auto *n2 = facet.getBaseT()->normal;
-            auto  d = n.x() * n2[0] + n.y() * n2[1] + n.z() * n2[2];
-#ifndef NDEBUG
-            Vec3f n3 = (dst_vertices[indices(0)] - centroid);
-            auto  d3 = n.dot(n3);
-            assert((d < 0.f) == (d3 < 0.f));
-#endif // NDEBUG
-            // Get the face normal from QHull.
-            if (d < 0.f)
-                // Fix face orientation.
-                std::swap(indices[1], indices[2]);
-            dst_facets.emplace_back(indices);
-        }
-    }
-
-    TriangleMesh mesh{ std::move(dst_vertices), std::move(dst_facets) };
-    assert(mesh.stats().manifold());
+    TriangleMesh mesh(its_convex_hull(this->its));
+    // Quite often qhull produces non-manifold mesh.
+    // assert(mesh.stats().manifold());
     return mesh;
 }
 
@@ -1079,6 +1030,90 @@ indexed_triangle_set its_make_sphere(double radius, double fa)
     }
 
     return mesh;
+}
+
+indexed_triangle_set its_convex_hull(const std::vector<Vec3f> &pts)
+{
+    std::vector<Vec3f>  dst_vertices;
+    std::vector<Vec3i>  dst_facets;
+
+    if (! pts.empty()) {
+        // The qhull call:
+        orgQhull::Qhull qhull;
+        qhull.disableOutputStream(); // we want qhull to be quiet
+    #if ! REALfloat
+        std::vector<realT> src_vertices;
+    #endif
+        try {
+    #if REALfloat
+            qhull.runQhull("", 3, (int)pts.size(), (const realT*)(pts.front().data()), "Qt");
+    #else
+            src_vertices.reserve(pts.size() * 3);
+            // We will now fill the vector with input points for computation:
+            for (const stl_vertex &v : pts)
+                for (int i = 0; i < 3; ++ i)
+                    src_vertices.emplace_back(v(i));
+            qhull.runQhull("", 3, (int)src_vertices.size() / 3, src_vertices.data(), "Qt");
+    #endif
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "its_convex_hull: Unable to create convex hull";
+            return {};
+        }
+
+        // Let's collect results:
+        // Map of QHull's vertex ID to our own vertex ID (pointing to dst_vertices).
+        std::vector<int>    map_dst_vertices;
+    #ifndef NDEBUG
+        Vec3f               centroid = Vec3f::Zero();
+        for (const stl_vertex& pt : pts)
+            centroid += pt;
+        centroid /= float(pts.size());
+    #endif // NDEBUG
+        for (const orgQhull::QhullFacet facet : qhull.facetList()) {
+            // Collect face vertices first, allocate unique vertices in dst_vertices based on QHull's vertex ID.
+            Vec3i  indices;
+            int    cnt = 0;
+            for (const orgQhull::QhullVertex vertex : facet.vertices()) {
+                int id = vertex.id();
+                assert(id >= 0);
+                if (id >= int(map_dst_vertices.size()))
+                    map_dst_vertices.resize(next_highest_power_of_2(size_t(id + 1)), -1);
+                if (int i = map_dst_vertices[id]; i == -1) {
+                    // Allocate a new vertex.
+                    i = int(dst_vertices.size());
+                    map_dst_vertices[id] = i;
+                    orgQhull::QhullPoint pt(vertex.point());
+                    dst_vertices.emplace_back(pt[0], pt[1], pt[2]);
+                    indices[cnt] = i;
+                } else {
+                    // Reuse existing vertex.
+                    indices[cnt] = i;
+                }
+                if (cnt ++ == 3)
+                    break;
+            }
+            assert(cnt == 3);
+            if (cnt == 3) {
+                // QHull sorts vertices of a face lexicographically by their IDs, not by face normals.
+                // Calculate face normal based on the order of vertices.
+                Vec3f n  = (dst_vertices[indices(1)] - dst_vertices[indices(0)]).cross(dst_vertices[indices(2)] - dst_vertices[indices(1)]);
+                auto *n2 = facet.getBaseT()->normal;
+                auto  d = n.x() * n2[0] + n.y() * n2[1] + n.z() * n2[2];
+    #ifndef NDEBUG
+                Vec3f n3 = (dst_vertices[indices(0)] - centroid);
+                auto  d3 = n.dot(n3);
+                assert((d < 0.f) == (d3 < 0.f));
+    #endif // NDEBUG
+                // Get the face normal from QHull.
+                if (d < 0.f)
+                    // Fix face orientation.
+                    std::swap(indices[1], indices[2]);
+                dst_facets.emplace_back(indices);
+            }
+        }
+    }
+
+    return { std::move(dst_facets), std::move(dst_vertices) };
 }
 
 void its_reverse_all_facets(indexed_triangle_set &its)

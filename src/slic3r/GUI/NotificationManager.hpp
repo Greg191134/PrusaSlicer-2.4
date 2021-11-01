@@ -52,6 +52,9 @@ enum class NotificationType
 	// Notification on the start of PrusaSlicer, when a new PrusaSlicer version is published.
 	// Contains a hyperlink to open a web browser pointing to the PrusaSlicer download location.
 	NewAppAvailable,
+	// Like NewAppAvailable but with text and link for alpha / bet release
+	NewAlphaAvailable,
+	NewBetaAvailable,
 	// Notification on the start of PrusaSlicer, when updates of system profiles are detected.
 	// Contains a hyperlink to execute installation of the new system profiles.
 	PresetUpdateAvailable,
@@ -105,7 +108,11 @@ enum class NotificationType
 	ProgressIndicator,
 	// Give user advice to simplify object with big amount of triangles
 	// Contains ObjectID for closing when object is deleted
-	SimplifySuggestion
+	SimplifySuggestion,
+	// information about netfabb is finished repairing model (blocking proccess)
+	NetfabbFinished,
+	// Short meesage to fill space between start and finish of export
+	ExportOngoing
 };
 
 class NotificationManager
@@ -123,6 +130,8 @@ public:
 		RegularNotificationLevel,
 		// Regular level notifiaction containing info about objects or print. Has Icon.
 		PrintInfoNotificationLevel,
+		// PrintInfoNotificationLevel with shorter time
+		PrintInfoShortNotificationLevel,
 		// Information notification without a fade-out or with a longer fade-out.
 		ImportantNotificationLevel,
 		// Warning, no fade-out.
@@ -144,6 +153,10 @@ public:
 	// ErrorNotificationLevel and ImportantNotificationLevel are never faded out.
     void push_notification(NotificationType type, NotificationLevel level, const std::string& text, const std::string& hypertext = "",
                            std::function<bool(wxEvtHandler*)> callback = std::function<bool(wxEvtHandler*)>(), int timestamp = 0);
+	// Pushes basic_notification with delay. See push_delayed_notification_data.
+	void push_delayed_notification(const NotificationType type, std::function<bool(void)> condition_callback, int64_t initial_delay, int64_t delay_interval);
+	// Removes all notifications of type from m_waiting_notifications
+	void stop_delayed_notifications_of_type(const NotificationType type);
 	// Creates Validate Error notification with a custom text and no fade out.
 	void push_validate_error_notification(const std::string& text);
 	// Creates Slicing Error notification with a custom text and no fade out.
@@ -692,27 +705,26 @@ private:
 	// and condition callback is success, notification is regular pushed from update function.
 	// Otherwise another delay interval waiting. Timestamp is 0. 
 	// Note that notification object is constructed when being added to the waiting list, but there are no updates called on it and its timer is reset at regular push.
-	// Also note that no control of same notification is done during push_delayed_notification but if waiting notif fails to push, it continues waiting.
-	void push_delayed_notification(std::unique_ptr<NotificationManager::PopNotification> notification, std::function<bool(void)> condition_callback, int64_t initial_delay, int64_t delay_interval);
-	// Removes all notifications of type from m_waiting_notifications
-	void stop_delayed_notifications_of_type(const NotificationType type);
+	// Also note that no control of same notification is done during push_delayed_notification_data but if waiting notif fails to push, it continues waiting.
+	void push_delayed_notification_data(std::unique_ptr<NotificationManager::PopNotification> notification, std::function<bool(void)> condition_callback, int64_t initial_delay, int64_t delay_interval);
 	//finds older notification of same type and moves it to the end of queue. returns true if found
 	bool activate_existing(const NotificationManager::PopNotification* notification);
 	// Put the more important notifications to the bottom of the list.
 	void sort_notifications();
 	// If there is some error notification active, then the "Export G-code" notification after the slicing is finished is suppressed.
     bool has_slicing_error_notification();
-	size_t get_standart_duration(NotificationLevel level)
+	size_t get_standard_duration(NotificationLevel level)
 	{
 		switch (level) {
 		
-		case NotificationLevel::ErrorNotificationLevel: 	    return 0;
-		case NotificationLevel::WarningNotificationLevel:	    return 0;
-		case NotificationLevel::ImportantNotificationLevel:     return 0;
-		case NotificationLevel::ProgressBarNotificationLevel:	return 2;
-		case NotificationLevel::RegularNotificationLevel: 	    return 10;
-		case NotificationLevel::PrintInfoNotificationLevel:     return 10;
-		case NotificationLevel::HintNotificationLevel:			return 300;
+		case NotificationLevel::ErrorNotificationLevel: 			return 0;
+		case NotificationLevel::WarningNotificationLevel:			return 0;
+		case NotificationLevel::ImportantNotificationLevel:			return 0;
+		case NotificationLevel::ProgressBarNotificationLevel:		return 2;
+		case NotificationLevel::PrintInfoShortNotificationLevel:	return 5;
+		case NotificationLevel::RegularNotificationLevel: 			return 10;
+		case NotificationLevel::PrintInfoNotificationLevel:			return 10;
+		case NotificationLevel::HintNotificationLevel:				return 300;
 		default: return 10;
 		}
 	}

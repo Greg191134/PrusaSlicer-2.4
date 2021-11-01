@@ -24,15 +24,17 @@ GLGizmoSimplify::GLGizmoSimplify(GLCanvas3D &       parent,
     , m_obj_index(0)
     , m_need_reload(false) 
     , m_show_wireframe(false)
-
+    , m_move_to_center(false)
+    // translation for GUI size
     , tr_mesh_name(_u8L("Mesh name"))
     , tr_triangles(_u8L("Triangles"))
     , tr_preview(_u8L("Preview"))
     , tr_detail_level(_u8L("Detail level"))
     , tr_decimate_ratio(_u8L("Decimate ratio"))
-
+    // for wireframe
     , m_wireframe_VBO_id(0)
     , m_wireframe_IBO_id(0)
+    , m_wireframe_IBO_size(0)
 {}
 
 GLGizmoSimplify::~GLGizmoSimplify() { 
@@ -41,11 +43,68 @@ GLGizmoSimplify::~GLGizmoSimplify() {
     free_gpu();
 }
 
-bool GLGizmoSimplify::on_init()
-{
-    //m_grabbers.emplace_back();
-    //m_shortcut_key = WXK_CONTROL_C;
+bool GLGizmoSimplify::on_esc_key_down() {
+    if (m_state == State::settings || m_state == State::canceling)
+        return false;
+
+    m_state = State::canceling;
     return true;
+}
+
+// while opening needs GLGizmoSimplify to set window position
+void GLGizmoSimplify::add_simplify_suggestion_notification(
+    const std::vector<size_t> &object_ids,
+    const ModelObjectPtrs &    objects,
+    NotificationManager &      manager)
+{
+    std::vector<size_t> big_ids;
+    big_ids.reserve(object_ids.size());
+    auto is_big_object = [&objects](size_t object_id) {
+        const uint32_t triangles_to_suggest_simplify = 1000000;
+        if (object_id >= objects.size()) return false; // out of object index
+        ModelVolumePtrs &volumes = objects[object_id]->volumes;
+        if (volumes.size() != 1) return false; // not only one volume
+        size_t triangle_count = volumes.front()->mesh().its.indices.size();
+        if (triangle_count < triangles_to_suggest_simplify)
+            return false; // small volume
+        return true;
+    };
+    std::copy_if(object_ids.begin(), object_ids.end(),
+                 std::back_inserter(big_ids), is_big_object);
+    if (big_ids.empty()) return;
+
+    for (size_t object_id : big_ids) {
+        std::string t = _u8L(
+            "Processing model '@object_name' with more than 1M triangles "
+            "could be slow. It is highly recommend to reduce "
+            "amount of triangles.");
+        t.replace(t.find("@object_name"), sizeof("@object_name") - 1,
+                  objects[object_id]->name);
+        // std::stringstream text;
+        // text << t << "\n";
+        std::string hypertext = _u8L("Simplify model");
+
+        std::function<bool(wxEvtHandler *)> open_simplify =
+            [object_id](wxEvtHandler *) {
+                auto plater = wxGetApp().plater();
+                if (object_id >= plater->model().objects.size()) return true;
+
+                Selection &selection = plater->canvas3D()->get_selection();
+                selection.clear();
+                selection.add_object((unsigned int) object_id);
+
+                auto &manager = plater->canvas3D()->get_gizmos_manager();
+                bool  close_notification = true;
+                if(!manager.open_gizmo(GLGizmosManager::Simplify))
+                    return close_notification;
+                GLGizmoSimplify* simplify = dynamic_cast<GLGizmoSimplify*>(manager.get_current());
+                if (simplify == nullptr) return close_notification;
+                simplify->set_center_position();
+                return close_notification;
+            };
+        manager.push_simplify_suggestion_notification(
+            t, objects[object_id]->id(), hypertext, open_simplify);
+    }
 }
 
 std::string GLGizmoSimplify::on_get_name() const
@@ -53,15 +112,12 @@ std::string GLGizmoSimplify::on_get_name() const
     return _u8L("Simplify");
 }
 
-void GLGizmoSimplify::on_render() { }
-
-void GLGizmoSimplify::on_render_for_picking() {}
-
 void GLGizmoSimplify::on_render_input_window(float x, float y, float bottom_limit)
 {
     create_gui_cfg();
-    int obj_index;
-    ModelVolume *act_volume = get_selected_volume(&obj_index);
+    const Selection &selection = m_parent.get_selection();
+    int obj_index = selection.get_object_idx();
+    ModelVolume *act_volume = get_volume(selection, wxGetApp().plater()->model());
     if (act_volume == nullptr) {
         switch (m_state) {
         case State::settings: close(); break;
@@ -92,8 +148,16 @@ void GLGizmoSimplify::on_render_input_window(float x, float y, float bottom_limi
         m_is_valid_result = false;
         m_exist_preview   = false;
         init_wireframe();
-
-        if (change_window_position) {
+        live_preview();
+        
+        // set window position
+        if (m_move_to_center && change_window_position) {
+            m_move_to_center = false;
+            auto parent_size = m_parent.get_canvas_size();            
+            ImVec2 pos(parent_size.get_width() / 2 - m_gui_cfg->window_offset_x,
+                       parent_size.get_height() / 2 - m_gui_cfg->window_offset_y); 
+            ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
+        }else if (change_window_position) {
             ImVec2 pos = ImGui::GetMousePos();
             pos.x -= m_gui_cfg->window_offset_x;
             pos.y -= m_gui_cfg->window_offset_y;
@@ -142,8 +206,8 @@ void GLGizmoSimplify::on_render_input_window(float x, float y, float bottom_limi
     ImGui::Separator();
 
     if(ImGui::RadioButton("##use_error", !m_configuration.use_count)) {
-        m_is_valid_result         = false;
         m_configuration.use_count = !m_configuration.use_count;
+        live_preview();
     }
     ImGui::SameLine();
     m_imgui->disabled_begin(m_configuration.use_count);
@@ -159,7 +223,6 @@ void GLGizmoSimplify::on_render_input_window(float x, float y, float bottom_limi
     ImGui::SetNextItemWidth(m_gui_cfg->input_width);
     static int reduction = 2;
     if(ImGui::SliderInt("##ReductionLevel", &reduction, 0, 4, reduce_captions[reduction].c_str())) {
-        m_is_valid_result = false;
         if (reduction < 0) reduction = 0;
         if (reduction > 4) reduction = 4;
         switch (reduction) {
@@ -169,12 +232,13 @@ void GLGizmoSimplify::on_render_input_window(float x, float y, float bottom_limi
         case 3: m_configuration.max_error = 0.5f; break;
         case 4: m_configuration.max_error = 1.f; break;
         }
+        live_preview();
     }
     m_imgui->disabled_end(); // !use_count
 
     if (ImGui::RadioButton("##use_count", m_configuration.use_count)) {
-        m_is_valid_result         = false;
         m_configuration.use_count = !m_configuration.use_count;
+        live_preview();
     }
     ImGui::SameLine();
 
@@ -191,57 +255,63 @@ void GLGizmoSimplify::on_render_input_window(float x, float y, float bottom_limi
     ImGui::SetNextItemWidth(m_gui_cfg->input_width);
     const char * format = (m_configuration.decimate_ratio > 10)? "%.0f %%": 
         ((m_configuration.decimate_ratio > 1)? "%.1f %%":"%.2f %%");
+
     if (ImGui::SliderFloat("##decimate_ratio", &m_configuration.decimate_ratio, 0.f, 100.f, format)) {
-        m_is_valid_result = false;
         if (m_configuration.decimate_ratio < 0.f)
             m_configuration.decimate_ratio = 0.01f;
         if (m_configuration.decimate_ratio > 100.f)
             m_configuration.decimate_ratio = 100.f;
         m_configuration.fix_count_by_ratio(triangle_count);
+        live_preview();
     }
 
     ImGui::NewLine();
     ImGui::SameLine(m_gui_cfg->bottom_left_width);
-    ImGui::Text(_L("%d triangles").c_str(), m_configuration.wanted_count);
+    ImGui::Text(_u8L("%d triangles").c_str(), m_configuration.wanted_count);
     m_imgui->disabled_end(); // use_count
 
-    if (ImGui::Checkbox(_L("Show wireframe").c_str(), &m_show_wireframe)) {
+    if (ImGui::Checkbox(_u8L("Show wireframe").c_str(), &m_show_wireframe)) {
         if (m_show_wireframe) init_wireframe();
         else free_gpu();
     }
 
-    if (m_state == State::settings) {
-        if (m_imgui->button(_L("Cancel"))) {
-            if (m_original_its.has_value()) { 
+    bool is_canceling = m_state == State::canceling;
+    m_imgui->disabled_begin(is_canceling);
+    if (m_imgui->button(_u8L("Cancel"))) {
+        if (m_state == State::settings) {
+            if (m_original_its.has_value()) {
                 set_its(*m_original_its);
                 m_state = State::close_on_end;
             } else {
                 close();
             }
+        } else {
+            m_state = State::canceling;
         }
-        ImGui::SameLine(m_gui_cfg->bottom_left_width);
-        if (m_imgui->button(_L("Preview"))) {
-            m_state = State::preview;
-            // simplify but not apply on mesh
-            process();
-        }
-        ImGui::SameLine();
-        if (m_imgui->button(_L("Apply"))) {
-            if (!m_is_valid_result) {
-                m_state = State::close_on_end;
-                process();
-            } else if (m_exist_preview) {
-                // use preview and close
-                after_apply();
-            } else { // no changes made
-                close();
-            }            
-        }
-    } else {        
-        m_imgui->disabled_begin(m_state == State::canceling);
-        if (m_imgui->button(_L("Cancel"))) m_state = State::canceling;
-        m_imgui->disabled_end(); 
+    } else if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && is_canceling)
+        ImGui::SetTooltip("%s", _u8L("Operation already canceling. Please wait few seconds.").c_str());
+    m_imgui->disabled_end(); // state canceling
 
+    ImGui::SameLine();
+
+    bool is_processing = m_state != State::settings;
+    m_imgui->disabled_begin(is_processing);
+    if (m_imgui->button(_u8L("Apply"))) {
+        if (!m_is_valid_result) {
+            m_state = State::close_on_end;
+            process();
+        } else if (m_exist_preview) {
+            // use preview and close
+            after_apply();
+        } else { // no changes made
+            close();
+        }            
+    } else if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && is_processing)
+        ImGui::SetTooltip("%s", _u8L("Can't apply when proccess preview.").c_str());
+    m_imgui->disabled_end(); // state !settings
+
+    // draw progress bar
+    if (is_processing) { // apply or preview
         ImGui::SameLine(m_gui_cfg->bottom_left_width);
         // draw progress bar
         char buf[32];
@@ -250,6 +320,7 @@ void GLGizmoSimplify::on_render_input_window(float x, float y, float bottom_limi
     }
     m_imgui->end();
 
+    // refresh view when needed
     if (m_need_reload) { 
         m_need_reload = false;
         bool close_on_end = (m_state == State::close_on_end);
@@ -279,23 +350,72 @@ void GLGizmoSimplify::close() {
     gizmos_mgr.open_gizmo(GLGizmosManager::EType::Simplify);
 }
 
+void GLGizmoSimplify::live_preview() {
+    m_is_valid_result = false;
+    if (m_state != State::settings) {
+        // already canceling process
+        if (m_state == State::canceling) return;
+
+        // wait until cancel
+        if (m_worker.joinable()) {
+            m_state = State::canceling;
+            m_dealy_process_cv.notify_one();
+            m_worker.join();
+        }
+    }
+
+    m_state = State::preview;
+    process();
+}
 
 void GLGizmoSimplify::process()
 {
-    class SimplifyCanceledException : public std::exception {
-    public:
-       const char* what() const throw() { return L("Model simplification has been canceled"); }
-    };
+    if (m_volume == nullptr) return;
+    if (m_volume->mesh().its.indices.empty()) return;
+    size_t count_triangles = m_volume->mesh().its.indices.size();
+    // Is neccessary simplification
+    if ((m_configuration.use_count && m_configuration.wanted_count >= count_triangles) ||
+        (!m_configuration.use_count && m_configuration.max_error <= 0.f)) {
+        
+        // Exist different original volume?
+        if (m_original_its.has_value() &&
+            m_original_its->indices.size() != count_triangles) {
+            indexed_triangle_set its = *m_original_its; // copy
+            set_its(its);
+        }        
+        m_is_valid_result = true;
 
-    if (!m_original_its.has_value())
+        // re-render bargraph
+        set_dirty();
+        m_parent.schedule_extra_frame(0);
+        return;
+    }
+
+    // when not store original volume store it for cancelation
+    if (!m_original_its.has_value()) {
         m_original_its = m_volume->mesh().its; // copy
 
-    auto plater = wxGetApp().plater();
-    plater->take_snapshot(_L("Simplify ") + m_volume->name);
-    plater->clear_before_change_mesh(m_obj_index);
+        // store previous state
+        auto plater = wxGetApp().plater();
+        plater->take_snapshot(_u8L("Simplify ") + m_volume->name);
+        plater->clear_before_change_mesh(m_obj_index);
+    }
+    
     m_progress = 0;
     if (m_worker.joinable()) m_worker.join();
-    m_worker = std::thread([this]() {
+
+    m_worker = std::thread([this]() {        
+        {// delay before process
+            std::unique_lock<std::mutex> lk(m_state_mutex);
+            auto is_modify = [this]() { return m_state == State::canceling; };
+            if (m_dealy_process_cv.wait_for(lk, m_gui_cfg->prcess_delay, is_modify)) {
+                // exist modification
+                m_state = State::settings;
+                request_rerender();
+                return;
+            }
+        }
+
         // store original triangles        
         uint32_t triangle_count = (m_configuration.use_count) ? m_configuration.wanted_count : 0;
         float    max_error      = (!m_configuration.use_count) ? m_configuration.max_error : std::numeric_limits<float>::max();
@@ -335,6 +455,7 @@ void GLGizmoSimplify::process()
 }
 
 void GLGizmoSimplify::set_its(indexed_triangle_set &its) {
+    if (m_volume == nullptr) return; // could appear after process
     m_volume->set_mesh(its);
     m_volume->calculate_convex_hull();
     m_volume->set_new_unique_id();
@@ -407,6 +528,7 @@ void GLGizmoSimplify::create_gui_cfg() {
     cfg.input_width   = cfg.bottom_left_width * 1.5;
     cfg.window_offset_x = (cfg.bottom_left_width + cfg.input_width)/2;
     cfg.window_offset_y = ImGui::GetTextLineHeightWithSpacing() * 5;
+    
     m_gui_cfg = cfg;
 }
 
@@ -415,6 +537,10 @@ void GLGizmoSimplify::request_rerender() {
         set_dirty();
         m_parent.schedule_extra_frame(0);
     });
+}
+
+void GLGizmoSimplify::set_center_position() {
+    m_move_to_center = true; 
 }
 
 bool GLGizmoSimplify::exist_volume(ModelVolume *volume) {
@@ -427,17 +553,34 @@ bool GLGizmoSimplify::exist_volume(ModelVolume *volume) {
     return false;
 }
 
-ModelVolume *GLGizmoSimplify::get_selected_volume(int *object_idx_ptr) const
+ModelVolume * GLGizmoSimplify::get_volume(const Selection &selection, Model &model)
 {
-    const Selection &selection  = m_parent.get_selection();
-    int object_idx = selection.get_object_idx();
-    if (object_idx_ptr != nullptr) *object_idx_ptr = object_idx;
-    if (object_idx < 0) return nullptr;
-    ModelObjectPtrs &objs = wxGetApp().plater()->model().objects;
-    if (static_cast<int>(objs.size()) <= object_idx) return nullptr;
-    ModelObject *obj = objs[object_idx];
-    if (obj->volumes.empty()) return nullptr;
-    return obj->volumes.front();
+    const Selection::IndicesList& idxs = selection.get_volume_idxs();
+    if (idxs.empty()) return nullptr;
+    // only one selected volume
+    if (idxs.size() != 1) return nullptr;
+    const GLVolume *selected_volume = selection.get_volume(*idxs.begin());
+    if (selected_volume == nullptr) return nullptr;
+
+    const GLVolume::CompositeID &cid  = selected_volume->composite_id;
+    const ModelObjectPtrs& objs = model.objects;
+    if (cid.object_id < 0 || objs.size() <= static_cast<size_t>(cid.object_id))
+        return nullptr;
+    const ModelObject* obj = objs[cid.object_id];
+    if (cid.volume_id < 0 || obj->volumes.size() <= static_cast<size_t>(cid.volume_id))
+        return nullptr;    
+    return obj->volumes[cid.volume_id];
+}
+
+const ModelVolume *GLGizmoSimplify::get_volume(const GLVolume::CompositeID &cid, const Model &model)
+{
+    const ModelObjectPtrs &objs = model.objects;
+    if (cid.object_id < 0 || objs.size() <= static_cast<size_t>(cid.object_id))
+        return nullptr;
+    const ModelObject *obj = objs[cid.object_id];
+    if (cid.volume_id < 0 || obj->volumes.size() <= static_cast<size_t>(cid.volume_id))
+        return nullptr;
+    return obj->volumes[cid.volume_id];
 }
 
 void GLGizmoSimplify::init_wireframe()
@@ -478,13 +621,17 @@ void GLGizmoSimplify::render_wireframe() const
     // is initialized?
     if (m_wireframe_VBO_id == 0 || m_wireframe_IBO_id == 0) return;
     if (!m_show_wireframe) return;
-    ModelVolume *act_volume = get_selected_volume();
-    if (act_volume == nullptr) return;    
-    const Transform3d trafo_matrix = 
-        act_volume->get_object()->instances[m_parent.get_selection().get_instance_idx()]
-        ->get_transformation().get_matrix() *
-        act_volume->get_matrix();
 
+    const auto& selection   = m_parent.get_selection();
+    const auto& volume_idxs = selection.get_volume_idxs();
+    if (volume_idxs.empty() || volume_idxs.size() != 1) return;
+    const GLVolume *selected_volume = selection.get_volume(*volume_idxs.begin());
+    
+    // check that selected model is wireframe initialized
+    if (m_volume != get_volume(selected_volume->composite_id, *m_parent.get_model()))
+        return;
+
+    const Transform3d trafo_matrix = selected_volume->world_matrix();
     glsafe(::glPushMatrix());
     glsafe(::glMultMatrixd(trafo_matrix.data()));
 

@@ -3,7 +3,7 @@
 
 set(SLIC3R_APP_NAME "PrusaSlicer")
 set(SLIC3R_APP_KEY "PrusaSlicer")
-set(SLIC3R_VERSION "2.4.0-alpha3")
-set(SLIC3R_BUILD_ID "PrusaSlicer-${SLIC3R_VERSION}+2021-10-02")
+set(SLIC3R_VERSION "2.4.0-beta1")
+set(SLIC3R_BUILD_ID "PrusaSlicer-${SLIC3R_VERSION}+2021-11-01")
 set(SLIC3R_RC_VERSION "2,4,0,0")
 set(SLIC3R_RC_VERSION_DOTS "2.4.0.0")

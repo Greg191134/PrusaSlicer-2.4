@@ -271,7 +271,7 @@ namespace Slic3r {
 
             // Simulates firmware st_synchronize() call
             void simulate_st_synchronize(float additional_time = 0.0f);
-            void calculate_time(size_t keep_last_n_blocks = 0);
+            void calculate_time(size_t keep_last_n_blocks = 0, float additional_time = 0.0f);
         };
 
         struct TimeProcessor
@@ -351,6 +351,9 @@ namespace Slic3r {
             // Positions of ends of lines of the final G-code this->filename after TimeProcessor::post_process() finalizes the G-code.
             std::vector<size_t> lines_ends;
             Pointfs bed_shape;
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+            float max_print_height;
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
             SettingsIds settings_ids;
             size_t extruders_count;
             std::vector<std::string> extruder_colors;

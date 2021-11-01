@@ -27,6 +27,11 @@
 #include <wx/numdlg.h>
 #include <wx/debug.h>
 #include <wx/busyinfo.h>
+#ifdef _WIN32
+#include <wx/richtooltip.h>
+#include <wx/custombgwin.h>
+#include <wx/popupwin.h>
+#endif
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Format/STL.hpp"
@@ -43,6 +48,7 @@
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 
 #include "GUI.hpp"
 #include "GUI_App.hpp"
@@ -83,6 +89,7 @@
 #include "PresetComboBoxes.hpp"
 #include "MsgDialog.hpp"
 #include "ProjectDirtyStateManager.hpp"
+#include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
 
 #ifdef __APPLE__
 #include "Gizmos/GLGizmosManager.hpp"
@@ -173,13 +180,10 @@ ObjectInfo::ObjectInfo(wxWindow *parent) :
     label_materials = init_info_label(&info_materials, _L("Materials"));
     Add(grid_sizer, 0, wxEXPAND);
 
-    auto *info_manifold_text = new wxStaticText(parent, wxID_ANY, _L("Manifold") + ":");
-    info_manifold_text->SetFont(wxGetApp().small_font());
     info_manifold = new wxStaticText(parent, wxID_ANY, "");
     info_manifold->SetFont(wxGetApp().small_font());
     manifold_warning_icon = new wxStaticBitmap(parent, wxID_ANY, create_scaled_bitmap(m_warning_icon_name));
     auto *sizer_manifold = new wxBoxSizer(wxHORIZONTAL);
-    sizer_manifold->Add(info_manifold_text, 0);
     sizer_manifold->Add(manifold_warning_icon, 0, wxLEFT, 2);
     sizer_manifold->Add(info_manifold, 0, wxLEFT, 2);
     Add(sizer_manifold, 0, wxEXPAND | wxTOP, 4);
@@ -201,10 +205,10 @@ void ObjectInfo::msw_rescale()
 
 void ObjectInfo::update_warning_icon(const std::string& warning_icon_name)
 {
-    if (warning_icon_name.empty())
-        return;
-    m_warning_icon_name = warning_icon_name;
-    manifold_warning_icon->SetBitmap(create_scaled_bitmap(m_warning_icon_name));
+    if ((showing_manifold_warning_icon = !warning_icon_name.empty())) {
+        m_warning_icon_name = warning_icon_name;
+        manifold_warning_icon->SetBitmap(create_scaled_bitmap(m_warning_icon_name));
+    }
 }
 
 enum SlicedInfoIdx
@@ -622,6 +626,12 @@ struct Sidebar::priv
     ~priv();
 
     void show_preset_comboboxes();
+
+#ifdef _WIN32
+    wxString btn_reslice_tip;
+    void show_rich_tip(const wxString& tooltip, wxButton* btn);
+    void hide_rich_tip(wxButton* btn);
+#endif
 };
 
 Sidebar::priv::~priv()
@@ -650,6 +660,47 @@ void Sidebar::priv::show_preset_comboboxes()
     scrolled->Refresh();
 }
 
+#ifdef _WIN32
+using wxRichToolTipPopup = wxCustomBackgroundWindow<wxPopupTransientWindow>;
+static wxRichToolTipPopup* get_rtt_popup(wxButton* btn)
+{
+    auto children = btn->GetChildren();
+    for (auto child : children)
+        if (child->IsShown())
+            return dynamic_cast<wxRichToolTipPopup*>(child);
+    return nullptr;
+}
+
+void Sidebar::priv::show_rich_tip(const wxString& tooltip, wxButton* btn)
+{   
+    if (tooltip.IsEmpty())
+        return;
+    wxRichToolTip tip(tooltip, "");
+    tip.SetIcon(wxICON_NONE);
+    tip.SetTipKind(wxTipKind_BottomRight);
+    tip.SetTitleFont(wxGetApp().normal_font());
+    tip.SetBackgroundColour(wxGetApp().get_window_default_clr());
+
+    tip.ShowFor(btn);
+    // Every call of the ShowFor() creates new RichToolTip and show it.
+    // Every one else are hidden. 
+    // So, set a text color just for the shown rich tooltip
+    if (wxRichToolTipPopup* popup = get_rtt_popup(btn)) {
+        auto children = popup->GetChildren();
+        for (auto child : children) {
+            child->SetForegroundColour(wxGetApp().get_label_clr_default());
+            // we neen just first text line for out rich tooltip
+            return;
+        }
+    }
+}
+
+void Sidebar::priv::hide_rich_tip(wxButton* btn)
+{
+    if (wxRichToolTipPopup* popup = get_rtt_popup(btn))
+        popup->Dismiss();
+}
+#endif
 
 // Sidebar / public
 
@@ -784,7 +835,19 @@ Sidebar::Sidebar(Plater *parent)
 #endif //__APPLE__
         ScalableBitmap bmp = ScalableBitmap(this, icon_name, bmp_px_cnt);
         *btn = new ScalableButton(this, wxID_ANY, bmp, "", wxBU_EXACTFIT);
+
+#ifdef _WIN32
+        (*btn)->Bind(wxEVT_ENTER_WINDOW, [tooltip, btn, this](wxMouseEvent& event) {
+            p->show_rich_tip(tooltip, *btn);
+            event.Skip();
+        });
+        (*btn)->Bind(wxEVT_LEAVE_WINDOW, [btn, this](wxMouseEvent& event) {
+            p->hide_rich_tip(*btn);
+            event.Skip();
+        });
+#else
         (*btn)->SetToolTip(tooltip);
+#endif // _WIN32
         (*btn)->Hide();
     };
 
@@ -843,6 +906,18 @@ Sidebar::Sidebar(Plater *parent)
             p->plater->reslice();
         p->plater->select_view_3D("Preview");
     });
+
+#ifdef _WIN32
+    p->btn_reslice->Bind(wxEVT_ENTER_WINDOW, [this](wxMouseEvent& event) {
+        p->show_rich_tip(p->btn_reslice_tip, p->btn_reslice);
+        event.Skip();
+    });
+    p->btn_reslice->Bind(wxEVT_LEAVE_WINDOW, [this](wxMouseEvent& event) {
+        p->hide_rich_tip(p->btn_reslice);
+        event.Skip();
+    });
+#endif // _WIN32
+
     p->btn_send_gcode->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { p->plater->send_gcode(); });
 //    p->btn_eject_device->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { p->plater->eject_drive(); });
 	p->btn_export_gcode_removable->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { p->plater->export_gcode(true); });
@@ -970,7 +1045,11 @@ void Sidebar::update_reslice_btn_tooltip() const
     wxString tooltip = wxString("Slice") + " [" + GUI::shortkey_ctrl_prefix() + "R]";
     if (m_mode != comSimple)
         tooltip += wxString("\n") + _L("Hold Shift to Slice & Export G-code");
+#ifdef _WIN32
+    p->btn_reslice_tip = tooltip;
+#else
     p->btn_reslice->SetToolTip(tooltip);
+#endif
 }
 
 void Sidebar::msw_rescale()
@@ -1144,24 +1223,13 @@ void Sidebar::show_info_sizer()
     p->object_info->info_facets->SetLabel(format_wxstr(_L_PLURAL("%1% (%2$d shell)", "%1% (%2$d shells)", stats.number_of_parts),
                                                        static_cast<int>(model_object->facets_count()), stats.number_of_parts));
 
-    if (stats.repaired()) {
-        int errors = stats.degenerate_facets + stats.edges_fixed + stats.facets_removed + stats.facets_reversed + stats.backwards_edges;
-        p->object_info->info_manifold->SetLabel(format_wxstr(_L_PLURAL("Auto-repaired %1$d error", "Auto-repaired %1$d errors", errors), errors));
-
-        auto mesh_errors = obj_list()->get_mesh_errors(true);
-        wxString tooltip = mesh_errors.first;
-
-        p->object_info->update_warning_icon(mesh_errors.second);
-        p->object_info->showing_manifold_warning_icon = true;
-        p->object_info->info_manifold->SetToolTip(tooltip);
-        p->object_info->manifold_warning_icon->SetToolTip(tooltip);
-    }
-    else {
-        p->object_info->info_manifold->SetLabel(_L("Yes"));
-        p->object_info->showing_manifold_warning_icon = false;
-        p->object_info->info_manifold->SetToolTip("");
-        p->object_info->manifold_warning_icon->SetToolTip("");
-    }
+    wxString info_manifold_label;
+    auto mesh_errors = obj_list()->get_mesh_errors_info(&info_manifold_label);
+    wxString tooltip = mesh_errors.tooltip;
+    p->object_info->update_warning_icon(mesh_errors.warning_icon_name);
+    p->object_info->info_manifold->SetLabel(info_manifold_label);
+    p->object_info->info_manifold->SetToolTip(tooltip);
+    p->object_info->manifold_warning_icon->SetToolTip(tooltip);
 
     p->object_info->show_sizer(true);
 
@@ -1730,7 +1798,6 @@ struct Plater::priv
 #endif // ENABLE_RELOAD_FROM_DISK_REPLACE_FILE
     void replace_with_stl();
     void reload_all_from_disk();
-    void create_simplify_notification(const std::vector<size_t>& obj_ids);
     void set_current_panel(wxPanel* panel);
 
     void on_select_preset(wxCommandEvent&);
@@ -2109,13 +2176,14 @@ void Plater::priv::update(unsigned int flags)
     }
 
     unsigned int update_status = 0;
-    if (this->printer_technology == ptSLA || (flags & (unsigned int)UpdateParams::FORCE_BACKGROUND_PROCESSING_UPDATE))
+    const bool force_background_processing_restart = this->printer_technology == ptSLA || (flags & (unsigned int)UpdateParams::FORCE_BACKGROUND_PROCESSING_UPDATE);
+    if (force_background_processing_restart)
         // Update the SLAPrint from the current Model, so that the reload_scene()
         // pulls the correct data.
         update_status = this->update_background_process(false, flags & (unsigned int)UpdateParams::POSTPONE_VALIDATION_ERROR_MESSAGE);
     this->view3D->reload_scene(false, flags & (unsigned int)UpdateParams::FORCE_FULL_SCREEN_REFRESH);
     this->preview->reload_print();
-    if (this->printer_technology == ptSLA)
+    if (force_background_processing_restart)
         this->restart_background_process(update_status);
     else
         this->schedule_background_process();
@@ -2243,6 +2311,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
     auto *new_model = (!load_model || one_by_one) ? nullptr : new Slic3r::Model();
     std::vector<size_t> obj_idxs;
+
+    int answer_convert_from_meters          = wxOK_DEFAULT;
+    int answer_convert_from_imperial_units  = wxOK_DEFAULT;
 
     for (size_t i = 0; i < input_files.size(); ++i) {
 #ifdef _WIN32
@@ -2389,30 +2460,60 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
             };
 
             if (!is_project_file) {
+                if (int deleted_objects = model.removed_objects_with_zero_volume(); deleted_objects > 0) {
+                    MessageDialog(q, format_wxstr(_L_PLURAL(
+                        "Object size from file %s appears to be zero.\n"
+                        "This object has been removed from the model",
+                        "Objects size from file %s appear to be zero.\n"
+                        "These objects have been removed from the model", deleted_objects), from_path(filename)) + "\n",
+                        _L("Object size is zero"), wxICON_INFORMATION | wxOK).ShowModal();
+                }
                 if (imperial_units)
                     // Convert even if the object is big.
                     convert_from_imperial_units(model, false);
                 else if (model.looks_like_saved_in_meters()) {
-                    MessageDialog msg_dlg(q, format_wxstr(_L_PLURAL(
-                        "The dimensions of the object from file %s seem to be defined in meters.\n"
-                        "The internal unit of PrusaSlicer are millimeters. Do you want to recalculate the dimensions of the object?",
-                        "The dimensions of some objects from file %s seem to be defined in meters.\n"
-                        "The internal unit of PrusaSlicer are millimeters. Do you want to recalculate the dimensions of these objects?", model.objects.size()), from_path(filename)) + "\n",
-                        _L("The object is too small"), wxICON_WARNING | wxYES | wxNO);
-                    if (msg_dlg.ShowModal() == wxID_YES)
-                        //FIXME up-scale only the small parts?
-                        model.convert_from_meters(true);
+                    auto convert_model_if = [](Model& model, bool condition) {
+                        if (condition)
+                            //FIXME up-scale only the small parts?
+                            model.convert_from_meters(true);
+                    };
+                    if (answer_convert_from_meters == wxOK_DEFAULT) {
+                        MessageWithCheckDialog dlg(q, format_wxstr(_L_PLURAL(
+                            "The dimensions of the object from file %s seem to be defined in meters.\n"
+                            "The internal unit of PrusaSlicer are millimeters. Do you want to recalculate the dimensions of the object?",
+                            "The dimensions of some objects from file %s seem to be defined in meters.\n"
+                            "The internal unit of PrusaSlicer are millimeters. Do you want to recalculate the dimensions of these objects?", model.objects.size()), from_path(filename)) + "\n",
+                            _L("Apply to all the remaining small objects being loaded."),
+                            _L("The object is too small"), wxICON_WARNING | wxYES | wxNO);
+                        int answer = dlg.ShowModal();
+                        if (dlg.GetCheckVal())
+                            answer_convert_from_meters = answer;
+                        else 
+                            convert_model_if(model, answer == wxID_YES);
+                    }
+                    convert_model_if(model, answer_convert_from_meters == wxID_YES);
                 }
                 else if (model.looks_like_imperial_units()) {
-                    MessageDialog msg_dlg(q, format_wxstr(_L_PLURAL(
-                        "The dimensions of the object from file %s seem to be defined in inches.\n"
-                        "The internal unit of PrusaSlicer are millimeters. Do you want to recalculate the dimensions of the object?",
-                        "The dimensions of some objects from file %s seem to be defined in inches.\n"
-                        "The internal unit of PrusaSlicer are millimeters. Do you want to recalculate the dimensions of these objects?", model.objects.size()), from_path(filename)) + "\n",
-                        _L("The object is too small"), wxICON_WARNING | wxYES | wxNO);
-                    if (msg_dlg.ShowModal() == wxID_YES)
-                        //FIXME up-scale only the small parts?
-                        convert_from_imperial_units(model, true);
+                    auto convert_model_if = [convert_from_imperial_units](Model& model, bool condition) {
+                        if (condition)
+                            //FIXME up-scale only the small parts?
+                            convert_from_imperial_units(model, true);
+                    };
+                    if (answer_convert_from_imperial_units == wxOK_DEFAULT) {
+                        MessageWithCheckDialog dlg(q, format_wxstr(_L_PLURAL(
+                            "The dimensions of the object from file %s seem to be defined in inches.\n"
+                            "The internal unit of PrusaSlicer are millimeters. Do you want to recalculate the dimensions of the object?",
+                            "The dimensions of some objects from file %s seem to be defined in inches.\n"
+                            "The internal unit of PrusaSlicer are millimeters. Do you want to recalculate the dimensions of these objects?", model.objects.size()), from_path(filename)) + "\n",
+                            _L("Apply to all the remaining small objects being loaded."),
+                            _L("The object is too small"), wxICON_WARNING | wxYES | wxNO);
+                        int answer = dlg.ShowModal();
+                        if (dlg.GetCheckVal())
+                            answer_convert_from_imperial_units = answer;
+                        else 
+                            convert_model_if(model, answer == wxID_YES);
+                    }
+                    convert_model_if(model, answer_convert_from_imperial_units == wxID_YES);
                 }
 
                 if (model.looks_like_multipart_object()) {
@@ -2506,8 +2607,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
             // this is required because the selected object changed and the flatten on face an sla support gizmos need to be updated accordingly
             view3D->get_canvas3d()->update_gizmos_on_off_state();
     }
-
-    create_simplify_notification(obj_idxs);
+        
+    GLGizmoSimplify::add_simplify_suggestion_notification(
+        obj_idxs, model.objects, *notification_manager);
 
     return obj_idxs;
 }
@@ -2950,12 +3052,19 @@ void Plater::priv::schedule_background_process()
 
 void Plater::priv::update_print_volume_state()
 {
+#if ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
+    const ConfigOptionPoints* opt = dynamic_cast<const ConfigOptionPoints*>(this->config->option("bed_shape"));
+    const Polygon bed_poly_convex = offset(Geometry::convex_hull(Polygon::new_scale(opt->values).points), static_cast<float>(scale_(BedEpsilon))).front();
+    const float bed_height = this->config->opt_float("max_print_height");
+    this->q->model().update_print_volume_state(bed_poly_convex, bed_height);
+#else
     BoundingBox     bed_box_2D = get_extents(Polygon::new_scale(this->config->opt<ConfigOptionPoints>("bed_shape")->values));
     BoundingBoxf3   print_volume(unscale(bed_box_2D.min(0), bed_box_2D.min(1), 0.0), unscale(bed_box_2D.max(0), bed_box_2D.max(1), scale_(this->config->opt_float("max_print_height"))));
     // Allow the objects to protrude below the print bed, only the part of the object above the print bed will be sliced.
     print_volume.offset(BedEpsilon);
     print_volume.min(2) = -1e10;
     this->q->model().update_print_volume_state(print_volume);
+#endif // ENABLE_OUT_OF_BED_DETECTION_IMPROVEMENTS
 }
 
 
@@ -3079,12 +3188,14 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     }
 
 	//actualizate warnings
-	if (invalidated != Print::APPLY_STATUS_UNCHANGED) {
+	if (invalidated != Print::APPLY_STATUS_UNCHANGED || background_process.empty()) {
+        if (background_process.empty())
+            process_validation_warning(std::string());
 		actualize_slicing_warnings(*this->background_process.current_print());
         actualize_object_warnings(*this->background_process.current_print());
 		show_warning_dialog = false;
-		process_completed_with_error = false;
-	}
+		process_completed_with_error = false;  
+	} 
 
     if (invalidated != Print::APPLY_STATUS_UNCHANGED && was_running && ! this->background_process.running() &&
         (return_state & UPDATE_BACKGROUND_PROCESS_RESTART) == 0) {
@@ -3688,53 +3799,6 @@ void Plater::priv::reload_all_from_disk()
     }
 }
 
-void Plater::priv::create_simplify_notification(const std::vector<size_t>& obj_ids) {
-    const uint32_t triangles_to_suggest_simplify = 1000000;
-
-    std::vector<size_t> big_ids;
-    big_ids.reserve(obj_ids.size());
-    std::copy_if(obj_ids.begin(), obj_ids.end(), std::back_inserter(big_ids),
-                 [this, triangles_to_suggest_simplify](size_t object_id) {
-            if (object_id >= model.objects.size()) return false; // out of object index
-            ModelVolumePtrs& volumes = model.objects[object_id]->volumes;
-            if (volumes.size() != 1) return false; // not only one volume
-            size_t triangle_count = volumes.front()->mesh().its.indices.size();
-            if (triangle_count < triangles_to_suggest_simplify) return false; // small volume
-            return true;
-        });
-
-    if (big_ids.empty()) return;
-
-    for (size_t object_id : big_ids) {
-        std::string t = _u8L(
-            "Processing model '@object_name' with more than 1M triangles "
-            "could be slow. It is highly recommend to reduce "
-            "amount of triangles.");
-        t.replace(t.find("@object_name"), sizeof("@object_name") - 1,
-                  model.objects[object_id]->name);
-        //std::stringstream text;
-        //text << t << "\n";
-        std::string hypertext = _u8L("Simplify model");
-
-        std::function<bool(wxEvtHandler *)> open_simplify = [object_id](wxEvtHandler *) {
-            auto plater = wxGetApp().plater();
-            if (object_id >= plater->model().objects.size()) return true;
-
-            Selection &selection = plater->canvas3D()->get_selection();
-            selection.clear();
-            selection.add_object((unsigned int) object_id);
-
-            auto &manager = plater->canvas3D()->get_gizmos_manager();
-            manager.open_gizmo(GLGizmosManager::EType::Simplify);
-            return true;
-        };
-        notification_manager->push_simplify_suggestion_notification(t, 
-                                                                    model.objects[object_id]->id(), 
-                                                                    hypertext, 
-                                                                    open_simplify);
-    }
-}
-
 void Plater::priv::set_current_panel(wxPanel* panel)
 {
     if (std::find(panels.begin(), panels.end(), panel) == panels.end())
@@ -3966,6 +4030,7 @@ void Plater::priv::on_export_began(wxCommandEvent& evt)
 {
 	if (show_warning_dialog)
 		warnings_dialog();  
+    notification_manager->push_delayed_notification(NotificationType::ExportOngoing, [](){return true;}, 1000, 1000);
 }
 void Plater::priv::on_slicing_began()
 {
@@ -4098,6 +4163,10 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         if(wxGetApp().get_mode() == comSimple) {
             show_action_buttons(false);
         }
+        if (exporting_status != ExportingStatus::NOT_EXPORTING && !has_error) {
+            notification_manager->stop_delayed_notifications_of_type(NotificationType::ExportOngoing);
+            notification_manager->close_notification_of_type(NotificationType::ExportOngoing);
+        }
         // If writing to removable drive was scheduled, show notification with eject button
         if (exporting_status == ExportingStatus::EXPORTING_TO_REMOVABLE && !has_error) {
             show_action_buttons(false);
@@ -4152,8 +4221,11 @@ void Plater::priv::on_right_click(RBtnEvent& evt)
     wxMenu* menu = nullptr;
 
     if (obj_idx == -1) { // no one or several object are selected
-        if (evt.data.second) // right button was clicked on empty space
+        if (evt.data.second) { // right button was clicked on empty space
+            if (!get_selection().is_empty()) // several objects are selected in 3DScene
+                return;
             menu = menus.default_menu();
+        }
         else
             menu = menus.multi_selection_menu();
     }
@@ -4169,12 +4241,14 @@ void Plater::priv::on_right_click(RBtnEvent& evt)
         if (printer_technology == ptSLA)
             menu = menus.sla_object_menu();
         else {
+            const Selection& selection = get_selection();
             // show "Object menu" for each one or several FullInstance instead of FullObject
-            const bool is_some_full_instances = get_selection().is_single_full_instance() || 
-                                                get_selection().is_single_full_object() || 
-                                                get_selection().is_multiple_full_instance();
-            menu = is_some_full_instances               ? menus.object_menu() : 
-                   get_selection().is_single_volume()   ? menus.part_menu()   : menus.multi_selection_menu();
+            const bool is_some_full_instances = selection.is_single_full_instance() || 
+                                                selection.is_single_full_object() || 
+                                                selection.is_multiple_full_instance();
+            const bool is_part = selection.is_single_volume() || selection.is_single_modifier();
+            menu = is_some_full_instances   ? menus.object_menu() : 
+                   is_part                  ? menus.part_menu()   : menus.multi_selection_menu();
         }
     }
 
@@ -4533,21 +4607,25 @@ bool Plater::priv::can_fix_through_netfabb() const
     std::vector<int> obj_idxs, vol_idxs;
     sidebar->obj_list()->get_selection_indexes(obj_idxs, vol_idxs);
 
+#if FIX_THROUGH_NETFABB_ALWAYS
+    // Fixing always.
+    return ! obj_idxs.empty() || ! vol_idxs.empty();
+#else // FIX_THROUGH_NETFABB_ALWAYS
+    // Fixing only if the model is not manifold.
     if (vol_idxs.empty()) {
         for (auto obj_idx : obj_idxs)
-            if (model.objects[obj_idx]->get_mesh_errors_count() > 0)
+            if (model.objects[obj_idx]->get_repaired_errors_count() > 0)
                 return true;
         return false;
     }
 
     int obj_idx = obj_idxs.front();
     for (auto vol_idx : vol_idxs)
-        if (model.objects[obj_idx]->get_mesh_errors_count(vol_idx) > 0)
+        if (model.objects[obj_idx]->get_repaired_errors_count(vol_idx) > 0)
             return true;
-
     return false;
+#endif // FIX_THROUGH_NETFABB_ALWAYS
 }
-
 
 bool Plater::priv::can_simplify() const
 {
@@ -6782,6 +6860,8 @@ bool Plater::is_render_statistic_dialog_visible() const
 
 Plater::TakeSnapshot::TakeSnapshot(Plater *plater, const std::string &snapshot_name)
 : TakeSnapshot(plater, from_u8(snapshot_name)) {}
+Plater::TakeSnapshot::TakeSnapshot(Plater* plater, const std::string& snapshot_name, UndoRedo::SnapshotType snapshot_type)
+: TakeSnapshot(plater, from_u8(snapshot_name), snapshot_type) {}
 
 
 // Wrapper around wxWindow::PopupMenu to suppress error messages popping out while tracking the popup menu.

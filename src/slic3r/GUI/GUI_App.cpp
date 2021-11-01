@@ -70,6 +70,7 @@
 #include "SavePresetDialog.hpp"
 #include "PrintHostDialogs.hpp"
 #include "DesktopIntegrationDialog.hpp"
+#include "SendSystemInfoDialog.hpp"
 
 #include "BitmapCache.hpp"
 #include "Notebook.hpp"
@@ -192,7 +193,7 @@ public:
         // load bitmap for logo
         BitmapCache bmp_cache;
         int logo_size = lround(width * 0.25);
-        wxBitmap logo_bmp = *bmp_cache.load_svg(wxGetApp().is_editor() ? "prusa_slicer_logo" : "add_gcode", logo_size, logo_size);
+        wxBitmap logo_bmp = *bmp_cache.load_svg(wxGetApp().logo_name(), logo_size, logo_size);
 
         wxCoord margin = int(m_scale * 20);
 
@@ -672,12 +673,19 @@ void GUI_App::post_init()
     // to popup a modal dialog on start without screwing combo boxes.
     // This is ugly but I honestly found no better way to do it.
     // Neither wxShowEvent nor wxWindowCreateEvent work reliably.
+    assert(this->preset_updater); // FIXME Following condition is probably not neccessary.
     if (this->preset_updater) {
         this->check_updates(false);
         CallAfter([this] {
-            this->config_wizard_startup();
+            bool cw_showed = this->config_wizard_startup();
             this->preset_updater->slic3r_update_notify();
             this->preset_updater->sync(preset_bundle);
+            if (! cw_showed) {
+                // The CallAfter is needed as well, without it, GL extensions did not show.
+                // Also, we only want to show this when the wizard does not, so the new user
+                // sees something else than "we want something" on the first start.
+                show_send_system_info_dialog_if_needed();
+            }
         });
     }
 
@@ -713,9 +721,11 @@ GUI_App::~GUI_App()
         delete preset_updater;
 }
 
-std::string GUI_App::get_gl_info(bool format_as_html, bool extensions)
+// If formatted for github, plaintext with OpenGL extensions enclosed into <details>.
+// Otherwise HTML formatted for the system info dialog.
+std::string GUI_App::get_gl_info(bool for_github)
 {
-    return OpenGLManager::get_gl_info().to_string(format_as_html, extensions);
+    return OpenGLManager::get_gl_info().to_string(for_github);
 }
 
 wxGLContext* GUI_App::init_glcontext(wxGLCanvas& canvas)
@@ -738,7 +748,8 @@ void GUI_App::init_app_config()
 {
 	// Profiles for the alpha are stored into the PrusaSlicer-alpha directory to not mix with the current release.
 //    SetAppName(SLIC3R_APP_KEY);
-	SetAppName(SLIC3R_APP_KEY "-alpha");
+//	SetAppName(SLIC3R_APP_KEY "-alpha");
+    SetAppName(SLIC3R_APP_KEY "-beta");
 //	SetAppDisplayName(SLIC3R_APP_NAME);
 
 	// Set the Slic3r data directory at the Slic3r XS module.
@@ -860,8 +871,11 @@ bool GUI_App::on_init_inner()
     wxInitAllImageHandlers();
 
 #ifdef _MSW_DARK_MODE
-    if (app_config->get("dark_color_mode") == "1")
+    if (bool dark_mode = app_config->get("dark_color_mode") == "1") {
         NppDarkMode::InitDarkMode();
+        if (dark_mode != NppDarkMode::IsDarkMode())
+            NppDarkMode::SetDarkMode(dark_mode);
+    }
 #endif
     SplashScreen* scrn = nullptr;
     if (app_config->get("show_splash_screen") == "1") {
@@ -878,7 +892,7 @@ bool GUI_App::on_init_inner()
         }
 
         // create splash screen with updated bmp
-        scrn = new SplashScreen(bmp.IsOk() ? bmp : create_scaled_bitmap("prusa_slicer_logo", nullptr, 400), 
+        scrn = new SplashScreen(bmp.IsOk() ? bmp : create_scaled_bitmap("PrusaSlicer", nullptr, 400), 
                                 wxSPLASH_CENTRE_ON_SCREEN | wxSPLASH_TIMEOUT, 4000, splashscreen_pos);
 #ifndef __linux__
         wxYield();
@@ -907,6 +921,23 @@ bool GUI_App::on_init_inner()
             if (this->plater_ != nullptr) {
                 if (*Semver::parse(SLIC3R_VERSION) < *Semver::parse(into_u8(evt.GetString()))) {
                     this->plater_->get_notification_manager()->push_notification(NotificationType::NewAppAvailable);
+                }
+            }
+            });
+        Bind(EVT_SLIC3R_ALPHA_VERSION_ONLINE, [this](const wxCommandEvent& evt) {
+            app_config->save();
+            if (this->plater_ != nullptr && app_config->get("notify_testing_release") == "1") {
+                if (*Semver::parse(SLIC3R_VERSION) < *Semver::parse(into_u8(evt.GetString()))) {
+                    this->plater_->get_notification_manager()->push_notification(NotificationType::NewAlphaAvailable);
+                }
+            }
+            });
+        Bind(EVT_SLIC3R_BETA_VERSION_ONLINE, [this](const wxCommandEvent& evt) {
+            app_config->save();
+            if (this->plater_ != nullptr && app_config->get("notify_testing_release") == "1") {
+                if (*Semver::parse(SLIC3R_VERSION) < *Semver::parse(into_u8(evt.GetString()))) {
+                    this->plater_->get_notification_manager()->close_notification_of_type(NotificationType::NewAlphaAvailable);
+                    this->plater_->get_notification_manager()->push_notification(NotificationType::NewBetaAvailable);
                 }
             }
             });
@@ -1546,7 +1577,7 @@ static const wxLanguageInfo* linux_get_existing_locale_language(const wxLanguage
 }
 #endif
 
-static int GetSingleChoiceIndex(const wxString& message,
+int GUI_App::GetSingleChoiceIndex(const wxString& message,
                                 const wxString& caption,
                                 const wxArrayString& choices,
                                 int initialSelection)
@@ -1995,14 +2026,14 @@ void GUI_App::add_config_menu(wxMenuBar *menu)
     menu->Append(local_menu, _L("&Configuration"));
 }
 
-void GUI_App::open_preferences(size_t open_on_tab)
+void GUI_App::open_preferences(size_t open_on_tab, const std::string& highlight_option)
 {
     bool app_layout_changed = false;
     {
         // the dialog needs to be destroyed before the call to recreate_GUI()
         // or sometimes the application crashes into wxDialogBase() destructor
         // so we put it into an inner scope
-        PreferencesDialog dlg(mainframe, open_on_tab);
+        PreferencesDialog dlg(mainframe, open_on_tab, highlight_option);
         dlg.ShowModal();
         app_layout_changed = dlg.settings_layout_changed();
 #if ENABLE_GCODE_LINES_ID_IN_H_SLIDER
@@ -2432,6 +2463,20 @@ void GUI_App::open_web_page_localized(const std::string &http_address)
     open_browser_with_warning_dialog(http_address + "&lng=" + this->current_language_code_safe());
 }
 
+// If we are switching from the FFF-preset to the SLA, we should to control the printed objects if they have a part(s).
+// Because of we can't to print the multi-part objects with SLA technology.
+bool GUI_App::may_switch_to_SLA_preset(const wxString& caption)
+{
+    if (model_has_multi_part_objects(model())) {
+        show_info(nullptr,
+            _L("It's impossible to print multi-part object(s) with SLA technology.") + "\n\n" +
+            _L("Please check your object list before preset changing."),
+            caption);
+        return false;
+    }
+    return true;
+}
+
 bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage start_page)
 {
     wxCHECK_MSG(mainframe != nullptr, false, "Internal error: Main frame not created / null");
@@ -2447,13 +2492,9 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
     if (res) {
         load_current_presets();
 
-        if (preset_bundle->printers.get_edited_preset().printer_technology() == ptSLA
-            && Slic3r::model_has_multi_part_objects(wxGetApp().model())) {
-            GUI::show_info(nullptr,
-                _L("It's impossible to print multi-part object(s) with SLA technology.") + "\n\n" +
-                _L("Please check and fix your object list."),
-                _L("Attention!"));
-        }
+        // #ysFIXME - delete after testing: This part of code looks redundant. All checks are inside ConfigWizard::priv::apply_config() 
+        if (preset_bundle->printers.get_edited_preset().printer_technology() == ptSLA)
+            may_switch_to_SLA_preset(_L("Configuration is editing from ConfigWizard"));
     }
 
     return res;
