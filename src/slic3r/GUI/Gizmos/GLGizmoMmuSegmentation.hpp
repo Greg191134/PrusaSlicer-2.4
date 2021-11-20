@@ -97,6 +97,8 @@ public:
     // will be also extended to support additional states, requiring at least one state to remain free out of 19 states.
     static const constexpr size_t EXTRUDERS_LIMIT = 16;
 
+    virtual const float get_cursor_radius_min() const { return CursorRadiusMin; }
+
 protected:
     std::array<float, 4> get_cursor_sphere_left_button_color() const override;
     std::array<float, 4> get_cursor_sphere_right_button_color() const override;
@@ -111,6 +113,9 @@ protected:
     bool on_is_activable() const override;
 
     wxString handle_snapshot_action_name(bool shift_down, Button button_down) const override;
+
+    std::string get_gizmo_entering_text() const override { return _u8L("Entering Multimaterial painting"); }
+    std::string get_gizmo_leaving_text() const override { return _u8L("Leaving Multimaterial painting"); }
     std::string get_action_snapshot_name() override { return _u8L("Multimaterial painting editing"); }
 
     size_t                            m_first_selected_extruder_idx  = 0;
@@ -119,6 +124,8 @@ protected:
     std::vector<std::array<float, 4>> m_original_extruders_colors;
     std::vector<std::array<float, 4>> m_modified_extruders_colors;
     std::vector<int>                  m_original_volumes_extruder_idxs;
+
+    static const constexpr float      CursorRadiusMin = 0.1f; // cannot be zero
 
 private:
     bool on_init() override;
