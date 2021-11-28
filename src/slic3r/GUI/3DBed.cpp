@@ -174,7 +174,7 @@ bool Bed3D::set_shape(const Pointfs& bed_shape, const double max_print_height, c
     }
 
     
-    if (m_build_volume.bed_shape() == bed_shape && m_type == type && m_texture_filename == texture_filename && m_model_filename == model_filename)
+    if (m_build_volume.bed_shape() == bed_shape && m_build_volume.max_print_height() == max_print_height && m_type == type && m_texture_filename == texture_filename && m_model_filename == model_filename)
         // No change, no need to update the UI.
         return false;
 
@@ -252,12 +252,16 @@ void Bed3D::render_internal(GLCanvas3D& canvas, bool bottom, float scale_factor,
 BoundingBoxf3 Bed3D::calc_extended_bounding_box() const
 {
     BoundingBoxf3 out { m_build_volume.bounding_volume() };
+    const Vec3d size = out.size();
+    // ensures that the bounding box is set as defined or the following calls to merge() will not work as intented
+    if (size.x() > 0.0 && size.y() > 0.0 && !out.defined)
+        out.defined = true;
     // Reset the build volume Z, we don't want to zoom to the top of the build volume if it is empty.
-    out.min.z() = 0;
-    out.max.z() = 0;
+    out.min.z() = 0.0;
+    out.max.z() = 0.0;
     // extend to contain axes
     out.merge(m_axes.get_origin() + m_axes.get_total_length() * Vec3d::Ones());
-    out.merge(out.min + Vec3d(-Axes::DefaultTipRadius, -Axes::DefaultTipRadius, out.max(2)));
+    out.merge(out.min + Vec3d(-Axes::DefaultTipRadius, -Axes::DefaultTipRadius, out.max.z()));
     // extend to contain model, if any
     BoundingBoxf3 model_bb = m_model.get_bounding_box();
     if (model_bb.defined) {
