@@ -349,7 +349,8 @@ void ObjectList::get_selection_indexes(std::vector<int>& obj_idxs, std::vector<i
 {
     wxDataViewItemArray sels;
     GetSelections(sels);
-    assert(!sels.IsEmpty());
+    if (sels.IsEmpty())
+        return;
 
     if ( m_objects_model->GetItemType(sels[0]) & itVolume || 
         (sels.Count()==1 && m_objects_model->GetItemType(m_objects_model->GetParent(sels[0])) & itVolume) ) {
@@ -424,7 +425,7 @@ MeshErrorsInfo ObjectList::get_mesh_errors_info(const int obj_idx, const int vol
     if (!stats.manifold()) {
         remaining_info = format_wxstr(_L_PLURAL("%1$d open edge", "%1$d open edges", stats.open_edges), stats.open_edges);
 
-        tooltip += _L("Remaning errors") + ":\n";
+        tooltip += _L("Remaining errors") + ":\n";
         tooltip += "\t" + format_wxstr(_L_PLURAL("%1$d open edge", "%1$d open edges", stats.open_edges), stats.open_edges) + "\n";
     }
 
@@ -1446,7 +1447,7 @@ void ObjectList::load_part(ModelObject& model_object, std::vector<ModelVolume*>&
     else
         wxGetApp().import_model(parent, input_files);
 
-    wxProgressDialog dlg(_L("Loading") + dots, "", 100, wxGetApp().plater(), wxPD_AUTO_HIDE);
+    wxProgressDialog dlg(_L("Loading") + dots, "", 100, wxGetApp().mainframe wxPD_AUTO_HIDE);
     wxBusyCursor busy;
 
     for (size_t i = 0; i < input_files.size(); ++i) {
@@ -1506,7 +1507,7 @@ void ObjectList::load_modifier(ModelObject& model_object, std::vector<ModelVolum
     else
         wxGetApp().import_model(parent, input_files);
 
-    wxProgressDialog dlg(_L("Loading") + dots, "", 100, wxGetApp().plater(), wxPD_AUTO_HIDE);
+    wxProgressDialog dlg(_L("Loading") + dots, "", 100, wxGetApp().mainframe, wxPD_AUTO_HIDE);
     wxBusyCursor busy;
 
     const int obj_idx = get_selected_obj_idx();
@@ -1556,7 +1557,7 @@ void ObjectList::load_modifier(ModelObject& model_object, std::vector<ModelVolum
             for (auto object : model.objects) {
                 if (model_object.origin_translation != Vec3d::Zero()) {
                     object->center_around_origin();
-                    Vec3d delta = model_object.origin_translation - object->origin_translation;
+                    const Vec3d delta = model_object.origin_translation - object->origin_translation;
                     for (auto volume : object->volumes) {
                         volume->translate(delta);
                     }
@@ -1570,6 +1571,12 @@ void ObjectList::load_modifier(ModelObject& model_object, std::vector<ModelVolum
         new_volume->name = boost::filesystem::path(input_file).filename().string();
         // set a default extruder value, since user can't add it manually
         new_volume->config.set_key_value("extruder", new ConfigOptionInt(0));
+        // update source data
+        new_volume->source.input_file = input_file;
+        new_volume->source.object_idx = obj_idx;
+        new_volume->source.volume_idx = int(model_object.volumes.size()) - 1;
+        if (model.objects.size() == 1 && model.objects.front()->volumes.size() == 1)
+            new_volume->source.mesh_offset = model.objects.front()->volumes.front()->source.mesh_offset;
 
         if (from_galery) {
             // Transform the new modifier to be aligned with the print bed.
@@ -4105,7 +4112,7 @@ void ObjectList::fix_through_netfabb()
     Plater::TakeSnapshot snapshot(plater, _L("Fix through NetFabb"));
 
     // Open a progress dialog.
-    wxProgressDialog progress_dlg(_L("Fixing through NetFabb"), "", 100, plater,
+    wxProgressDialog progress_dlg(_L("Fixing through NetFabb"), "", 100, find_toplevel_parent(plater),
                                     wxPD_AUTO_HIDE | wxPD_APP_MODAL | wxPD_CAN_ABORT);
     int model_idx{ 0 };
     if (vol_idxs.empty()) {

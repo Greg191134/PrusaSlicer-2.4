@@ -1340,7 +1340,10 @@ namespace SupportMaterialInternal {
             // so we take the largest value and also apply safety offset to be ensure no gaps
             // are left in between
             Flow perimeter_bridge_flow = layerm.bridging_flow(frPerimeter);
-            float w = float(std::max(perimeter_bridge_flow.scaled_width(), perimeter_bridge_flow.scaled_spacing()));
+            //FIXME one may want to use a maximum of bridging flow width and normal flow width, as the perimeters are calculated using the normal flow
+            // and then turned to bridging flow, thus their centerlines are derived from non-bridging flow and expanding them by a bridging flow
+            // may not expand them to the edge of their respective islands.
+            const float w = float(0.5 * std::max(perimeter_bridge_flow.scaled_width(), perimeter_bridge_flow.scaled_spacing())) + scaled<float>(0.001);
             for (Polyline &polyline : overhang_perimeters)
                 if (polyline.is_straight()) {
                     // This is a bridge 
@@ -1355,7 +1358,7 @@ namespace SupportMaterialInternal {
                                 supported[j] = true;
                     if (supported[0] && supported[1])
                         // Offset a polyline into a thick line.
-                        polygons_append(bridges, offset(polyline, 0.5f * w + 10.f));
+                        polygons_append(bridges, offset(polyline, w));
                 }
             bridges = union_(bridges);
         }
@@ -1480,7 +1483,7 @@ static inline std::tuple<Polygons, Polygons, Polygons, float> detect_overhangs(
         overhang_polygons = to_polygons(layer.lslices);
 #endif
         // Expand for better stability.
-        contact_polygons = expand(overhang_polygons, scaled<float>(object_config.raft_expansion.value));
+        contact_polygons = object_config.raft_expansion.value > 0 ? expand(overhang_polygons, scaled<float>(object_config.raft_expansion.value)) : overhang_polygons;
     }
     else if (! layer.regions().empty())
     {
@@ -2354,8 +2357,8 @@ PrintObjectSupportMaterial::MyLayersPtr PrintObjectSupportMaterial::bottom_conta
         Polygons &layer_support_area = layer_support_areas[layer_id];
         Polygons *layer_buildplate_covered = buildplate_covered.empty() ? nullptr : &buildplate_covered[layer_id];
         // Filtering the propagated support columns to two extrusions, overlapping by maximum 20%.
-        float column_propagation_filtering_radius = scaled<float>(0.8 * 0.5 * (m_support_params.support_material_flow.spacing() + m_support_params.support_material_flow.width()));
-        task_group.run([&grid_params, &overhangs_projection, &overhangs_projection_raw, &layer, &layer_support_area, layer_buildplate_covered, column_propagation_filtering_radius
+//        float column_propagation_filtering_radius = scaled<float>(0.8 * 0.5 * (m_support_params.support_material_flow.spacing() + m_support_params.support_material_flow.width()));
+        task_group.run([&grid_params, &overhangs_projection, &overhangs_projection_raw, &layer, &layer_support_area, layer_buildplate_covered /* , column_propagation_filtering_radius */
 #ifdef SLIC3R_DEBUG 
             , iRun, layer_id
 #endif /* SLIC3R_DEBUG */
@@ -3044,7 +3047,7 @@ PrintObjectSupportMaterial::MyLayersPtr PrintObjectSupportMaterial::generate_raf
                     raft = diff(expand(raft, step), trimming);
             } else
                 raft = diff(raft, trimming);
-            if (contacts != nullptr)
+            if (! interface_polygons.empty())
                 columns_base->polygons = diff(columns_base->polygons, interface_polygons);
         }
         if (! brim.empty()) {
